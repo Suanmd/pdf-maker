@@ -1,0 +1,67 @@
+% _tmp.tex - 单章独立编译模板
+%
+% 由 fix.py 自动复制并写入实际的章节中间文件名（chN.tex / 附录X_ch.tex），
+% 然后作为 `_tmp.tex` 交给 xelatex 编译。作者一般不需要手动改动本文件。
+%
+% 它包含与 main.tex 同源的关键补丁：中文 URL 支持、参考文献降级、
+% 代码块环境、图片宽度上限、防溢出。集中放这里，章节源文件保持干净。
+
+\documentclass[a4paper, 11pt]{ctexrep}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage[unicode]{hyperref}
+\usepackage{indentfirst}
+\usepackage{xcolor}
+\usepackage{xeCJK}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds, calc}
+\usepackage{adjustbox}
+\usepackage{tcolorbox}
+\tcbuselibrary{listings, skins, breakable}
+\usepackage{enumitem}
+\usepackage{url}
+\usepackage{etoolbox}
+
+% === 中文 URL 支持 ===
+\makeatletter
+\def\Url@FormatString{%
+ \UrlFont
+ \expandafter\UrlLeft\Url@String\UrlRight
+}
+\makeatother
+
+% === 参考文献降级 + 不跳页 + 不改页眉 ===
+\makeatletter
+\patchcmd{\thebibliography}{\chapter*{\bibname}}{\section*{\bibname}}{}{}
+\patchcmd{\thebibliography}{\@mkboth{\MakeUppercase\bibname}{\MakeUppercase\bibname}}{}{}{}
+\makeatother
+
+\XeTeXlinebreaklocale "zh"
+\XeTeXlinebreakskip=0pt
+\graphicspath{{figures/}}
+\DeclareGraphicsExtensions{.pdf,.png,.jpg}
+\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
+
+% === 代码块环境：浅灰打底 + 自动换行（禁用裸 \verbatim） ===
+\newtcblisting{codeblock}{
+  colback=gray!10!white, colframe=gray!45!white, boxrule=0.4pt,
+  arc=3pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
+  listing only, breakable,
+  listing options={
+    breaklines=true, breakatwhitespace=true,
+    basicstyle=\small\ttfamily, showstringspaces=false,
+    frame=none, numbers=none, aboveskip=0pt, belowskip=0pt
+  }
+}
+
+% === 防溢出 ===
+\setlength{\emergencystretch}{3.5em}
+
+\begin{document}
+\input{chN.tex}    % ← fix.py 自动替换为 ch1.tex / ch2.tex / 附录A_ch.tex
+\end{document}

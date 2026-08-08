@@ -1,0 +1,159 @@
+% main.tex - 整书主控模板
+%
+% 作用：整书合并时所有章节的唯一入口。把各章 \input 进来，统一页面、页眉页脚、
+% 参考文献样式、代码块、图片宽度上限等。章节源文件无需关心这些全局设置。
+%
+% 使用步骤：
+%   1. 替换所有 {{XXX}} 占位符（TITLE / SUBTITLE / EPIGRAPH / AUTHOR / DATE / PROJECT）。
+%   2. 编辑 {{CHAPTERS_LIST}}（每章一行 \input{第N章/第N章}）。
+%   3. 若不需要扉页 / 序言 / 附录 / 结尾段，删除对应整块。
+%   4. xelatex 跑两遍（第二遍解析交叉引用）。
+%   5. 收尾：删 main.aux/log/out/toc，保留 main.tex 与 main.pdf。
+
+\documentclass[a4paper, 11pt, twoside]{ctexrep}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{tabularx}
+\usepackage[unicode]{hyperref}
+\usepackage{indentfirst}
+\usepackage{xcolor}
+\usepackage{xeCJK}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds, calc}
+\usepackage{adjustbox}            % 图片宽度上限：每个 tikzpicture 套 max width=\textwidth
+\usepackage{tcolorbox}
+\tcbuselibrary{listings, skins, breakable}   % listings 引擎让 codeblock 自动折行
+\usepackage{enumitem}
+\usepackage{url}
+
+% === 中文 URL 支持 ===
+% url.sty 默认在 math mode 渲染 URL，xeCJK 不接管 math mode，中文会变成豆腐块。
+% 重写 \Url@FormatString 去掉 math mode，中文走正常字体分类即可正确显示。
+\makeatletter
+\def\Url@FormatString{%
+ \UrlFont
+ \expandafter\UrlLeft\Url@String\UrlRight
+}
+\makeatother
+
+\usepackage{etoolbox}
+\usepackage{geometry}
+\usepackage{fancyhdr}
+
+% === 参考文献降级 + 不跳页 + 不改页眉 ===
+% book/ctexrep 的 thebibliography 默认 \chapter*（最大级标题 + 跳页 + 改页眉）。
+% 重定义为 \section* 并去掉 \@mkboth，与正文页眉保持一致。
+\makeatletter
+\patchcmd{\thebibliography}{\chapter*{\bibname}}{\section*{\bibname}}{}{}
+\patchcmd{\thebibliography}{\@mkboth{\MakeUppercase\bibname}{\MakeUppercase\bibname}}{}{}{}
+\makeatother
+
+\geometry{margin=2.5cm}
+
+% === 页眉页脚统一 ===
+% ctexrep 默认 headings 把页码放在页眉外侧（奇数页右 / 偶数页左），章节首页 plain
+% 页码在底部正中，混合观察就是「页码位置不一致」。
+% 用 fancyhdr 接管：页眉显示 chapter/section 标题，页码统一在页脚居中。
+\setlength{\headheight}{15pt}
+\pagestyle{fancy}
+\fancyhead[LE,RO]{\slshape\nouppercase{\leftmark}}
+\fancyhead[LO,RE]{\slshape\nouppercase{\rightmark}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+\fancypagestyle{plain}{%
+  \fancyhf{}%
+  \fancyfoot[C]{\thepage}%
+  \renewcommand{\headrulewidth}{0pt}%
+  \renewcommand{\footrulewidth}{0pt}%
+}
+
+\XeTeXlinebreaklocale "zh"
+\XeTeXlinebreakskip=0pt
+\graphicspath{{figures/}}
+\DeclareGraphicsExtensions{.pdf,.png,.jpg}
+
+\hypersetup{
+  colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue,
+  pdftitle={{TITLE}},
+  pdfauthor={{AUTHOR}},
+  pdfsubject={{SUBTITLE}}
+}
+
+% === 代码块环境：浅灰打底 + 自动换行 ===
+% tcolorbox + listings 引擎（\newtcblisting），breaklines 自动折行长代码行，
+% 与正文明显区分。禁用裸 \verbatim（不折行会溢出页面）。
+\newtcblisting{codeblock}{
+  colback=gray!10!white, colframe=gray!45!white, boxrule=0.4pt,
+  arc=3pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
+  listing only, breakable,
+  listing options={
+    breaklines=true, breakatwhitespace=true,
+    basicstyle=\small\ttfamily, showstringspaces=false,
+    frame=none, numbers=none, aboveskip=0pt, belowskip=0pt
+  }
+}
+
+% === 防溢出：吸收段落级微小超宽 ===
+% 不能解决 TikZ 节点不可断词 / 显示公式超宽——那些须改源码。
+\setlength{\emergencystretch}{3.5em}
+
+\begin{document}
+
+% ============ 扉页 ============
+\thispagestyle{empty}
+\begin{center}
+\vspace*{5cm}
+{\Huge\bfseries {{TITLE}}\par}
+\vspace{0.8cm}
+{\Large\bfseries {{SUBTITLE}}\par}
+\vspace{1.5cm}
+\rule{0.7\textwidth}{0.4pt}\par
+\vspace{1cm}
+{\large {{EPIGRAPH}}\par}
+\vspace{4cm}
+{\large {{AUTHOR}}\quad 整理\par}
+\vspace{0.8cm}
+{\large {{DATE}}\par}
+\end{center}
+\newpage
+
+% ============ 序言（可选：若不需要则整段删除） ============
+\thispagestyle{empty}
+\chapter*{序\quad 言}
+\addcontentsline{toc}{chapter}{序言}
+
+% 在此输入序言正文（建议 200-400 字，介绍写作缘起 / 资料来源 / 读者对象 / 阅读建议）
+
+\newpage
+
+% ============ 目录 ============
+\thispagestyle{empty}
+\renewcommand{\contentsname}{目\quad 录}
+\tableofcontents
+\newpage
+
+% ============ 正文各章 ============
+% 章节文件用 \chapter{} 作为顶层命令（与 ctexrep 默认 chapter 行为对齐）。
+% 每章一个 \input；ctexrep 自动生成「第 X 章」前缀与 X.Y 编号。
+{{CHAPTERS_LIST}}
+
+% ============ 附录（可选：若不需要则整段删除） ============
+% \appendix
+% {{APPENDICES_LIST}}
+
+% ============ 结尾段（可选：若不需要则整段删除） ============
+\vspace{2em}
+\begin{center}
+\rule{0.5\textwidth}{0.4pt}\par
+\vspace{0.5cm}
+{\large\itshape {{EPIGRAPH_CLOSING}}\par}
+\vspace{0.3cm}
+{\small {{DATE}}\ 完稿\par}
+\end{center}
+
+\end{document}

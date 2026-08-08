@@ -1,0 +1,98 @@
+# -*- coding: utf-8 -*-
+"""check_overflow.py - xelatex 编译日志体检（体检之三，阻断级）。
+
+用途
+----
+编译完成后，解析 xelatex 生成的 .log，汇总「会让成品出问题的」信号，
+作为单章 / 整书交付前的最后一道卡口。
+
+检查项（阻断级：存在即非零退出）
+---------------------------------
+- ``Overfull \\hbox``        ：段落 / 显示公式 / 节点文字溢出页面宽度。
+- ``Missing character``     ：字体缺失（豆腐块 / 空白）。
+- ``multiply-defined``      ：同一 \\label 跨章重名，导致 \\ref 指向错误编号。
+- ``undefined references``  ：引用断链（??）。
+- ``LaTeX Error`` / Fatal   ：编译致命错误。
+
+非阻断（仅提示）：``Underfull \\hbox``（松散度警告，不强制）。
+
+是否调用 / 何时调用
+------------------
+由单章编译 SOP 在「xelatex 两遍之后」调用；整书合并后同样调用一次。
+属于硬卡口：存在阻断级信号必须先修源码再交付。
+用法：
+    python check_overflow.py [LOGFILE]
+    python check_overflow.py _tmp.log
+    python check_overflow.py            # 自动寻找 _tmp.log / main.log / book.log
+
+退出码：0 阻断级信号全清；非 0 存在阻断级问题。
+"""
+import re
+import sys
+from pathlib import Path
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except (AttributeError, OSError):
+    pass
+
+
+def find_log() -> Path | None:
+    here = Path(__file__).parent
+    for cand in ("_tmp.log", "main.log", "book.log"):
+        for base in (Path("."), here.parent):
+            p = base / cand
+            if p.exists():
+                return p
+    return None
+
+
+def main() -> int:
+    if len(sys.argv) > 1:
+        log = Path(sys.argv[1])
+    else:
+        log = find_log()
+    if log is None or not log.exists():
+        raise SystemExit("[check_overflow.py] 找不到日志文件（传参 LOGFILE 或先编译）")
+
+    txt = log.read_text(encoding="utf-8", errors="ignore")
+
+    overfull = re.findall(r"Overfull", txt)
+    missing = re.findall(r"Missing character", txt)
+    multidef = re.findall(r"multiply-defined", txt)
+    undefref = re.findall(r"(?:undefined references?|Reference .* undefined)", txt)
+    fatal = re.findall(r"(?:Fatal error|Emergency stop|LaTeX Error)", txt)
+    underfull = re.findall(r"Underfull", txt)
+
+    print(f"日志：{log}")
+    print(f"  Overfull \\hbox        : {len(overfull)}  {'<-- 阻断' if overfull else '(OK)'}")
+    print(f"  Missing character     : {len(missing)}  {'<-- 阻断' if missing else '(OK)'}")
+    print(f"  multiply-defined label: {len(multidef)}  {'<-- 阻断' if multidef else '(OK)'}")
+    print(f"  undefined references  : {len(undefref)}  {'<-- 阻断' if undefref else '(OK)'}")
+    print(f"  Fatal/Error           : {len(fatal)}  {'<-- 阻断' if fatal else '(OK)'}")
+    print(f"  Underfull \\hbox        : {len(underfull)}  (仅警告，不阻断)")
+
+    if overfull:
+        print("\n前几条 Overfull 位置（去重）：")
+        seen = set()
+        for m in re.finditer(r"Overfull[^\\]*?(?=\n\n|\n[^%]|Overfull|$)", txt):
+            snippet = m.group(1).replace("\n", " ").strip()
+            key = snippet[:60]
+            if key in seen:
+                continue
+            seen.add(key)
+            print(f"  • {snippet[:140]}")
+            if len(seen) >= 8:
+                break
+
+    blocking = bool(overfull or missing or multidef or undefref or fatal)
+    if blocking:
+        print("\n❌ 存在阻断级问题，必须先修源码再交付。")
+        return 1
+    print("\n✅ 阻断级信号全清（Underfull 若过多可顺手优化，不阻断）。")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
