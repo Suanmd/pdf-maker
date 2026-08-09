@@ -16,6 +16,8 @@
 
 非阻断（仅提示）：``Underfull \\hbox``（松散度警告，不强制）。
 
+发现 Overfull 时会打印前若干条所在行（含 ``at lines X--Y``），便于直接定位源码。
+
 是否调用 / 何时调用
 ------------------
 由单章编译 SOP 在「xelatex 两遍之后」调用；整书合并后同样调用一次。
@@ -25,7 +27,10 @@
     python check_overflow.py _tmp.log
     python check_overflow.py            # 自动寻找 _tmp.log / main.log / book.log
 
-退出码：0 阻断级信号全清；非 0 存在阻断级问题。
+注意（Windows）：传路径请用 ``D:/path/to/_tmp.log`` 这类形式；Git Bash 风格的
+``/d/path/...`` 不会被 Python 识别，会报「找不到日志文件」。
+
+退出码：0 阻断级信号全清；非 0 存在阻断级问题或找不到日志。
 """
 import re
 import sys
@@ -37,11 +42,14 @@ try:
 except (AttributeError, OSError):
     pass
 
+MAX_SHOWN = 8   # Overfull 明细最多打印几条
 
-def find_log() -> Path | None:
+
+def find_log():
+    """在当前目录与脚本相关目录中寻找常见日志文件名。"""
     here = Path(__file__).parent
     for cand in ("_tmp.log", "main.log", "book.log"):
-        for base in (Path("."), here.parent):
+        for base in (Path.cwd(), here, here.parent):
             p = base / cand
             if p.exists():
                 return p
@@ -54,16 +62,19 @@ def main() -> int:
     else:
         log = find_log()
     if log is None or not log.exists():
-        raise SystemExit("[check_overflow.py] 找不到日志文件（传参 LOGFILE 或先编译）")
+        raise SystemExit(
+            "[check_overflow.py] 找不到日志文件。请显式传入路径"
+            "（如 python check_overflow.py _tmp.log），或先完成一次编译。"
+        )
 
     txt = log.read_text(encoding="utf-8", errors="ignore")
 
-    overfull = re.findall(r"Overfull", txt)
+    overfull = re.findall(r"Overfull \\(?:hbox|vbox)", txt)
     missing = re.findall(r"Missing character", txt)
     multidef = re.findall(r"multiply-defined", txt)
     undefref = re.findall(r"(?:undefined references?|Reference .* undefined)", txt)
     fatal = re.findall(r"(?:Fatal error|Emergency stop|LaTeX Error)", txt)
-    underfull = re.findall(r"Underfull", txt)
+    underfull = re.findall(r"Underfull \\(?:hbox|vbox)", txt)
 
     print(f"日志：{log}")
     print(f"  Overfull \\hbox        : {len(overfull)}  {'<-- 阻断' if overfull else '(OK)'}")
@@ -71,26 +82,35 @@ def main() -> int:
     print(f"  multiply-defined label: {len(multidef)}  {'<-- 阻断' if multidef else '(OK)'}")
     print(f"  undefined references  : {len(undefref)}  {'<-- 阻断' if undefref else '(OK)'}")
     print(f"  Fatal/Error           : {len(fatal)}  {'<-- 阻断' if fatal else '(OK)'}")
-    print(f"  Underfull \\hbox        : {len(underfull)}  (仅警告，不阻断)")
+    print(f"  Underfull \\hbox       : {len(underfull)}  (仅警告，不阻断)")
 
     if overfull:
+        # 逐行抓取：LaTeX 会把 "Overfull \hbox (Xpt too wide) in paragraph at lines A--B"
+        # 打在同一行，这一行本身就含定位信息，直接展示即可。
         print("\n前几条 Overfull 位置（去重）：")
         seen = set()
-        for m in re.finditer(r"Overfull[^\\]*?(?=\n\n|\n[^%]|Overfull|$)", txt):
-            snippet = m.group(1).replace("\n", " ").strip()
+        for line in re.findall(r"^Overfull.*$", txt, flags=re.MULTILINE):
+            snippet = line.strip()
             key = snippet[:60]
             if key in seen:
                 continue
             seen.add(key)
-            print(f"  • {snippet[:140]}")
-            if len(seen) >= 8:
+            print(f"  - {snippet[:140]}")
+            if len(seen) >= MAX_SHOWN:
                 break
+        if not seen:
+            print("  （日志中未能提取到明细行，请直接搜索日志里的 Overfull）")
+
+    if missing:
+        chars = sorted(set(re.findall(r"Missing character: There is no (\S+)", txt)))
+        if chars:
+            print(f"\n缺失字符（去重，前 20 个）：{' '.join(chars[:20])}")
 
     blocking = bool(overfull or missing or multidef or undefref or fatal)
     if blocking:
-        print("\n❌ 存在阻断级问题，必须先修源码再交付。")
+        print("\n[FAIL] 存在阻断级问题，必须先修源码再交付。")
         return 1
-    print("\n✅ 阻断级信号全清（Underfull 若过多可顺手优化，不阻断）。")
+    print("\n[OK] 阻断级信号全清（Underfull 若过多可顺手优化，不阻断）。")
     return 0
 
 

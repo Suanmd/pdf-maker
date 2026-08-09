@@ -10,16 +10,30 @@
 ------------------
 1. 先把 ``_tmp.pdf`` 复制为 ``第N章.pdf``（必须在删 ``_tmp.*`` 之前，
    否则会误删成品 PDF）。
-2. 删除中间文件：``chN.tex``、``find_urls.py``（一次性工具）、``_tmp.*``。
+2. 删除中间文件：``chN.tex``、``_tmp.*``（``find_urls.py`` 等常驻脚本保留，不删）。
 
 保留项
 ------
 ``第N章.tex``、``第N章.pdf``、以及本 skill 的常驻脚本
-（fix.py / verify_urls.py / check.py / check_balance.py / cleanup.py 等）。
+（fix.py / verify_urls.py / find_urls.py / check.py / check_balance.py / cleanup.py 等）。
 
 是否调用 / 何时调用
 ------------------
 由单章编译 SOP 在「xelatex 两遍 + 视觉确认之后」调用，每章必跑。
+
+路径解析规则（重要）
+--------------------
+成品 PDF（``_tmp.pdf``）与中间文件统一写在「源文件所在目录」。本脚本按以下顺序
+定位该工作目录，第一个命中 ``_tmp.pdf`` 即用：
+
+    1. <当前工作目录>/第N章      ← 标准子目录布局（推荐）
+    2. <当前工作目录>            ← 旧扁平布局 / 直接在章目录执行
+    3. <脚本所在目录>/第N章
+    4. <脚本所在目录>
+
+因此只需从书稿项目根目录用 skill 的实际安装路径调用（如
+``python /path/to/skill/scripts/cleanup.py 3``，skill 装在哪都行），也可 ``cd 第3章`` 后执行同一命令。
+
 用法：
     python cleanup.py [CH_NUM]     # 默认第 1 章
     python cleanup.py 3
@@ -38,23 +52,44 @@ except (AttributeError, OSError):
 HERE = Path(__file__).parent
 CH_NUM = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 
+
+def find_workdir(ch_num: int) -> Path:
+    """定位 ``_tmp.pdf`` 所在的章工作目录：CWD 优先，脚本目录兜底。"""
+    cands = [
+        Path.cwd() / f"第{ch_num}章",
+        Path.cwd(),
+        HERE / f"第{ch_num}章",
+        HERE,
+    ]
+    for d in cands:
+        if (d / "_tmp.pdf").exists():
+            return d
+    # 没找到 _tmp.pdf：退而求其次，返回首个存在的目录以便安全清理中间文件
+    for d in cands:
+        if d.exists():
+            return d
+    return Path.cwd()
+
+
+WORK = find_workdir(CH_NUM)
+
 # 1. 先复制成品 PDF（顺序敏感：必须在清 _tmp.* 之前）
-tmp_pdf = HERE / "_tmp.pdf"
-target_pdf = HERE / f"第{CH_NUM}章.pdf"
+tmp_pdf = WORK / "_tmp.pdf"
+target_pdf = WORK / f"第{CH_NUM}章.pdf"
 if tmp_pdf.exists():
     target_pdf.write_bytes(tmp_pdf.read_bytes())
     print(f"[cleanup.py] Copied: _tmp.pdf -> {target_pdf.name}")
 else:
-    print(f"[cleanup.py] 警告：未找到 {tmp_pdf.name}，跳过复制")
+    print(f"[cleanup.py] 警告：未找到 {tmp_pdf}，跳过复制")
 
 # 2. 删除中间文件 / 一次性工具
-kill_files = [f"ch{CH_NUM}.tex", "find_urls.py"]
+kill_files = [f"ch{CH_NUM}.tex"]
 intermediate_globs = [
     "_tmp.aux", "_tmp.log", "_tmp.out", "_tmp.toc",
     "_tmp.synctex.gz", "_tmp.tex", "_tmp.pdf",
 ]
 for name in kill_files:
-    f = HERE / name
+    f = WORK / name
     if f.exists():
         try:
             f.unlink()
@@ -63,7 +98,7 @@ for name in kill_files:
             print(f"[cleanup.py] Skip: {f.name} ({e})")
 
 for pat in intermediate_globs:
-    for f in HERE.glob(pat):
+    for f in WORK.glob(pat):
         try:
             f.unlink()
             print(f"[cleanup.py] Removed: {f.name}")

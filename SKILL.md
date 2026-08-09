@@ -1,5 +1,6 @@
 ---
 name: "pdf-maker"
+version: "1.1.0"
 description: "中文 LaTeX 报告工程化 skill。基于 xelatex + ctexrep + xeCJK，提供单章独立编译与整书合并双模式、源代码预处理修复、强制素材阅读校验、编译日志体检、表格/图/URL 排版约定与分类踩坑速查。适用于中文技术报告、调研报告、白皮书、论文。"
 ---
 
@@ -55,6 +56,8 @@ description: "中文 LaTeX 报告工程化 skill。基于 xelatex + ctexrep + xe
 ### A. 只用当前生效目录
 
 本 skill 可能以多个副本存在（例如带 `.bak` 后缀的备份）。**只用当前生效的 `pdf-maker/` 目录**，任何 `.bak` / 旧版本目录都禁止作为工作目录——选错版本会走错 SOP，导致整章返工。
+
+> **已注册（canonical）位置**：`~/.workbuddy/skills/pdf-maker/`（用户级，框架自动发现）。若在其它位置发现副本，**以注册位置为准**，不要并行维护多份导致 SOP 漂移。开源仓库（GitHub）是唯一权威源，本地注册副本应与之保持一致。
 
 ### B. 单章模式：每章独立编译
 
@@ -121,12 +124,14 @@ e3. 若单工具也失败 = 工具层真挂；否则原工具重试
 
 - 用 ctexrep 默认的 `\chapter` 行为（自动 clearpage + 「第 X 章」前缀 + X.Y / X.Y.Z 编号），**不要**去 hack `\chapter` 去掉 clearpage，也**不要**冗余 `\renewcommand{\thechapter}` 之类的重定义——默认即可。
 - twoside + `\geometry{margin=2.5cm}`：整书必加（页面利用率 + 奇偶页页眉）。
+- **参考文献策略**：整书合并时**保持每章参考文献独立**，不合并为单一文献（每章自带 `thebibliography`，各自从 [1] 起编、互不干扰）。详见 § 14。
+- **preamble 按场景取用，不得串用**：单章编译取 `assets/templates/_tmp.tex` 模板的 preamble（由 `fix.py` 读取并填入章节文件名，模板是唯一真源，见 § 9）；整书合并取 `main.tex` 模板的 preamble（含 `twoside` / `geometry` / `fancyhdr` / PDF 元数据）。**整书合并禁止误用单章 `_tmp.tex` 模板的 preamble**——它只含单章级补丁、缺 twoside / 页眉 / 元数据，见 § 9。
 
 ---
 
 ## 4. 标准目录结构
 
-一个使用本 skill 的项目，推荐结构：
+一个使用本 skill 的项目，**强制**每章一个独立子目录（章节源、中间文件、成品都收在章目录内）：
 
 ```
 <项目名>/
@@ -134,13 +139,17 @@ e3. 若单工具也失败 = 工具层真挂；否则原工具重试
 ├── materials.json                 # 章节素材阅读状态（track_materials.py 维护）
 ├── figures/                       # 全部图形资源
 ├── 第1章/
-│   ├── 第1章.tex                  # 章节源（手写）
-│   ├── 第1章.pdf                  # 编译成品
+│   ├── 第1章.tex                  # 章节源（手写，顶层 \chapter）
+│   ├── ch1.tex                    # fix.py 生成的英文名中间文件
+│   ├── _tmp.tex                   # fix.py 生成的单章编译入口
+│   ├── 第1章.pdf                  # 单章成品
 │   └── chapter_init_notes/        # 素材逐块通读笔记（可选但推荐）
 ├── 第2章/...
 ```
 
-**禁止**留在章节目录的文件：`*.bak` / `test_*.tex` / `_tmp.*` / `chN.tex`。（`cleanup.py` 会负责清理。）
+- 整书 `main.tex` 用 `\input{第N章/第N章}` 引入各章（见 `assets/templates/main.tex` 的章节列表占位符）。
+- `fix.py` 优先读 `第N章/第N章.tex`；若章目录不存在，回退旧的扁平 `第N章.tex`（兼容存量项目）。
+- **禁止**留在章节目录的文件：`*.bak` / `test_*.tex`。（`_tmp.*` / `chN.tex` 由 `cleanup.py` 在单章交付后清理，见 § 6 step 8。）
 
 ---
 
@@ -148,19 +157,21 @@ e3. 若单工具也失败 = 工具层真挂；否则原工具重试
 
 写任何章节之前，先把对应素材「逐块完整通读」并校验，杜绝「读一半就写」。
 
+> **路径约定（贯穿 § 5–§ 7）**：`<PDF_MAKER>` = pdf-maker 技能的安装根目录（如 `~/.workbuddy/skills/pdf-maker/` 或你存放本仓库的任意路径）；`<PROJECT>` = 你的书稿项目根目录（含 `第N章/` 与各 `*.tex`）。所有脚本都从 `<PROJECT>` 执行，用技能的实际安装路径调用（例如 `python <PDF_MAKER>/scripts/reader.py ...`）。脚本从「当前工作目录（`<PROJECT>`）」定位源文件；模板从「技能自身安装目录」向上定位，因此无需复制脚本或模板进项目。
+
 ```
 [素材阅读 SOP - 每章动笔前必跑]
   S1. 定位素材源
-      若为首次：python scripts/track_materials.py init <项目目录>
-      否则：     python scripts/track_materials.py show <项目目录>
+      若为首次：python <PDF_MAKER>/scripts/track_materials.py init <项目目录>
+      否则：     python <PDF_MAKER>/scripts/track_materials.py show <项目目录>
 
   S2. 对每个素材跑 reader.py 三阶段：
-      a. python scripts/reader.py index  <素材文件>   # 总览 + 初始化阅读状态
-      b. python scripts/reader.py chunk  <素材文件> N  # 逐块读（0-based，循环到末尾）
-      c. python scripts/reader.py verify <素材文件>    # 5 字段全过才算读完
+      a. python <PDF_MAKER>/scripts/reader.py index  <素材文件>   # 总览 + 初始化阅读状态
+      b. python <PDF_MAKER>/scripts/reader.py chunk  <素材文件> N  # 逐块读（0-based，循环到末尾）
+      c. python <PDF_MAKER>/scripts/reader.py verify <素材文件>    # 5 字段全过才算读完
 
   S3. verify 全过后，标记状态：
-      python scripts/track_materials.py update <项目> <章> <size> <lines> <N>
+      python <PDF_MAKER>/scripts/track_materials.py update <项目> <章> <size> <lines> <N>
 
   S4. 输出 § 1.F 的阅读证明行到回复首行
 
@@ -177,24 +188,37 @@ e3. 若单工具也失败 = 工具层真挂；否则原工具重试
 
 ## 6. 单章编译 SOP（每章一循环）
 
+> 路径约定见 § 5 开头（`<PDF_MAKER>` / `<PROJECT>`）：所有脚本从 `<PROJECT>` 执行。
+
 ```
 [单章 N 循环]
+  # 约定：在「书稿项目根目录 <PROJECT>」下执行；<PDF_MAKER> = skill 安装根目录
+  #   cd <PROJECT>
   0. 跑 § 5 素材阅读 SOP（若未跑）                  ← 强制前置
-  1. write 第N章.tex                 # 按素材大纲写
-  2. python scripts/fix.py N         # URL 规范化 + 图片宽度上限 + 生成 chN.tex + _tmp.tex
-  3. python scripts/verify_urls.py N # URL 真实可达，全部 200 才继续
-      失败 → 替换源文件里的 URL → 回到 step 2
-  4. python scripts/check.py N       # 内容结构统计（参考用）
-     python scripts/check_balance.py N  # 结构/引用均衡（告警/阻断）
-  5. xelatex -halt-on-error -interaction=nonstopmode _tmp.tex   # 第 1 遍
-     xelatex -halt-on-error -interaction=nonstopmode _tmp.tex   # 第 2 遍（交叉引用）
-  6. 看 _tmp.log → "X errors" 必须为 0
-     python scripts/check_overflow.py _tmp.log   # 抓 Overfull/缺失字符/重复label/断链/Fatal，必须为 0
-  7. 看 _tmp.pdf：
+  1. write 第N章/第N章.tex           # 按素材大纲写（标准子目录布局，见 § 4）
+  2. python <PDF_MAKER>/scripts/fix.py N         # URL 规范化 + 图片宽度上限 + 生成 chN.tex + 第N章/_tmp.tex
+  3. python <PDF_MAKER>/scripts/verify_urls.py N # URL 真实可达，全部 200 才继续
+      注意：本步发起真实 HTTP 请求，需在「允许联网」环境下运行（本宿主沙箱
+            默认拦截出站 TLS，运行前需放行网络；报错 SSL EOF 多为沙箱拦截而非 URL 真坏）。
+      失败 → 替换源文件里的 URL → 回到 step 2。
+      脚本已内置 archive.org 快照兜底：直连 202/SSL EOF 等不可达时自动改查
+            web.archive.org 稳定镜像，多数 DOI/IEEE/ACM 死链可因此通过，无需手写探测脚本。
+  4. python <PDF_MAKER>/scripts/check.py N       # 内容结构统计（参考用）
+     python <PDF_MAKER>/scripts/check_balance.py N  # 结构/引用均衡（告警/阻断）
+  5. xelatex -halt-on-error -interaction=nonstopmode 第N章/_tmp.tex   # 第 1 遍（日志/PDF 落在 第N章/）
+     xelatex -halt-on-error -interaction=nonstopmode 第N章/_tmp.tex   # 第 2 遍（交叉引用）
+  6. 看 第N章/_tmp.log → "X errors" 必须为 0
+     python <PDF_MAKER>/scripts/check_overflow.py 第N章/_tmp.log   # 抓 Overfull/缺失字符/重复label/断链/Fatal，必须为 0
+     # 参考文献三项约定（约定见 § 14，合并阶段不再重复，见 § 7）：
+     #   (a) 本章 \bibitem 尽量不使用可选标签 [n]（check_balance 会提示，非阻断；目的是保证从 [1] 顺序编号）；
+     #   (b) 本章内 bibitem 键唯一（无 multiply-defined）；
+     #   (c) 本章每个 \cite 都有对应 \bibitem（无 ?? 断链）。
+     #   (b)(c) 由 check_overflow（multiply-defined / undefined references）覆盖；(a) 人工确认编号从 [1] 起。
+  7. 看 第N章/_tmp.pdf：
        - 第 1 页
        - 抽样看带图 / 带表那一页
        - 确认页数符合预期
-  8. python scripts/cleanup.py N     # 复制 _tmp.pdf → 第N章.pdf + 清理临时
+  8. python <PDF_MAKER>/scripts/cleanup.py N     # 复制 第N章/_tmp.pdf → 第N章.pdf + 清理临时
   9. 记录本章交付 OK
 [下一章]
 ```
@@ -211,21 +235,23 @@ e3. 若单工具也失败 = 工具层真挂；否则原工具重试
 
 ## 7. 整书合并 SOP
 
-模板见 `assets/templates/main.tex`。
+模板见 `assets/templates/main.tex`。**整书合并使用 `main.tex` 模板的 preamble（含 twoside / geometry / fancyhdr / PDF 元数据）；不要手写 preamble，也不要误用单章 `_tmp.tex` 模板的 preamble（缺整书级格式）**（见 § 3 / § 9）。
 
 ```
 1. 关闭所有 PDF 阅读器（见 § 13，否则 xelatex 写 PDF 会被锁）
 2. 确认所有 第N章/第N章.pdf 存在且页数合理
-3. python scripts/fix_labels.py <项目目录>   # 整书级：去重跨章重复 label
+3. python <PDF_MAKER>/scripts/fix_labels.py <项目目录>   # 整书级：去重跨章重复 label
 4. xelatex -halt-on-error -interaction=nonstopmode main.tex   # 第 1 遍
    xelatex -halt-on-error -interaction=nonstopmode main.tex   # 第 2 遍
-5. python scripts/check_overflow.py main.log   # 整书日志体检，必须为 0
+5. python <PDF_MAKER>/scripts/check_overflow.py main.log   # 整书日志体检，必须为 0
 6. 看 main.pdf：封面 / 序言 / 目录 / 每章第 1 页 / 偶数页（验证 twoside 页眉）
 7. 校验 PDF 元数据（标题 / 作者 / 主题）已写入
 8. cleanup：删 main.aux/log/out/toc（保留 main.tex main.pdf）
 ```
 
 `fix_labels.py` 修改了章节源文件后，需重跑 `fix.py` + 编译 + `check_overflow.py` 确认 0 冲突。
+
+> **参考文献正确性不在合并阶段检查**：每章从 [1] 起编、键全局唯一、0 断链已在单章 SOP § 6 step 6 中保证（check_overflow 覆盖 multiply-defined / undefined references，并人工确认编号）。合并只需确认整体视觉与 PDF 元数据，无需重复校验参考文献。
 
 ---
 
@@ -234,13 +260,13 @@ e3. 若单工具也失败 = 工具层真挂；否则原工具重试
 每个脚本都遵循统一说明格式：**用途 / 检查或处理项 / 是否调用 / 调用时机 / 退出码**。
 导入了 `scripts/` 下的其它模块时会显式 `import`；不存在隐藏依赖。
 
-| 脚本 | 职责 | 是否自动调用 | 调用时机 |
+| 脚本（`scripts/` 目录下） | 职责 | 是否自动调用 | 调用时机 |
 |------|------|--------------|----------|
-| `scripts/fix.py` | 单章预处理：URL 规范化 + 图片宽度上限 + 生成 `chN.tex`/`_tmp.tex` | 是（每章必跑） | § 6 step 2 |
+| `scripts/fix.py` | 单章预处理：URL 规范化 + 图片宽度上限 + 生成 `chN.tex`/`_tmp.tex`。源文件优先 `第N章/第N章.tex`，章目录不存在则回退扁平 `第N章.tex` | 是（每章必跑） | § 6 step 2 |
 | `scripts/verify_urls.py` | 章节 URL 真实可达校验（HTTP 200） | 是（每章必跑） | § 6 step 3 |
 | `scripts/find_urls.py` | 候选权威源兜底探测（verify 失败时找替代） | 否（按需手动） | verify 失败时 |
 | `scripts/check.py` | 内容结构统计（字数 / 层级 / 元素计数） | 是（参考用） | § 6 step 4 |
-| `scripts/check_balance.py` | 结构/引用均衡（小节字数下限、表格数、bibitem==url） | 是（告警/阻断） | § 6 step 4 |
+| `scripts/check_balance.py` | 结构/引用均衡（小节字数下限、表格数、bibitem==url、孤儿 bibitem 检测、悬空 \cite 检测；兼容 \bibitem{key} 与 \bibitem[label]{key}） | 是（告警/阻断） | § 6 step 4 |
 | `scripts/check_overflow.py` | 编译日志体检（Overfull/缺失字符/重复label/断链/Fatal） | 是（硬卡口） | § 6 step 6 / § 7 step 5 |
 | `scripts/cleanup.py` | 复制成品 PDF + 清理临时文件 | 是（每章必跑） | § 6 step 8 |
 | `scripts/fix_labels.py` | 跨章重复 `\label` 去重（整书级修复） | 否（整书合并前一次） | § 7 step 3 |
@@ -250,7 +276,7 @@ e3. 若单工具也失败 = 工具层真挂；否则原工具重试
 **三类 check 脚本的统一语义**：
 
 - `check.py`：只统计，不阻断（给作者密度参考）。
-- `check_balance.py`：质量告警；严重不均衡（如 bibitem≠url）非零退出，但通常作为告警由作者判断。
+- `check_balance.py`：质量告警；严重不均衡（如 bibitem≠url、孤儿 bibitem 未被引用、悬空 \cite 无对应条目）非零退出，但通常作为告警由作者判断。
 - `check_overflow.py`：硬卡口；存在阻断级日志信号即非零退出，必须先修源码。
 
 > 注：旧版曾有一个「检查图节点几何重叠」的脚本，已移除——图的排版规范已在 § 11 作为**前置约定**明确，写作时即遵守，无需事后检查。
@@ -264,11 +290,11 @@ e3. 若单工具也失败 = 工具层真挂；否则原工具重试
 | 文件 | 用途 |
 |------|------|
 | `assets/templates/main.tex` | 整书主控模板（twoside + 默认 chapter + margin=2.5cm + 封面 + PDF 元数据 + 页眉页脚 + 中文 URL + 代码块 + 防溢出） |
-| `assets/templates/_tmp.tex` | 单章独立编译 preamble（由 `fix.py` 复制并替换文件名后生成实际 `_tmp.tex`） |
+| `assets/templates/_tmp.tex` | 单章独立编译 preamble 的**唯一真源**。`fix.py` 读取本文件，把占位符 `CHAPTER_TEX` 替换为实际章节中间文件名（chN.tex / 附录X_ch.tex），写出章节目录的 `_tmp.tex`。单章与整书两套 preamble 的关键补丁（中文 URL / 参考文献降级 / 代码块 / 防溢出）必须保持一致，详见 § 3 |
 | `assets/templates/url-href.tex` | 中文 / 特殊字符 URL 写法参考（§ 12） |
 | `assets/examples/chapter_init_notes_template.md` | 素材逐块通读笔记模板（§ 5） |
 
-> `_tmp.tex` 文件名带下划线前缀，但它**不是临时文件**而是模板：`fix.py` 会复制其内容并把 `\input{chN.tex}` 替换成实际文件名后写入章节目录的 `_tmp.tex`。
+> `_tmp.tex` 文件名带下划线前缀，但它**不是临时文件**：它是 `fix.py` 写出的**单章编译入口**（含完整 preamble + `\input{实际章节中间文件}`）。其 preamble 来自 `assets/templates/_tmp.tex` 模板——`fix.py` 读取该模板并把占位符 `CHAPTER_TEX` 替换为真实文件名（如 `ch1.tex`），模板是唯一真源，`fix.py` 不再内联副本。
 
 ---
 
@@ -341,13 +367,33 @@ e3. 若单工具也失败 = 工具层真挂；否则原工具重试
 
 PowerShell 下某些情况的 exit 1 是伪信号。判定成功与否看「PDF 是否生成 + 页数是否符合预期 + 日志错误数」，不要仅凭退出码。
 
+### 环境与工具链备注
+
+- **用 `pymupdf`（`import pymupdf`）而非 `fitz`**：`fitz` 已弃用，会打印 `DeprecationWarning`，功能不受影响，但日志噪声大。
+- **`chardet` 可能不可用**：脚本不要依赖它做编码探测；统一以 UTF-8 读写 `.tex` / `.py`。
+- **sandbox safe-delete 守卫**：`rm` / `cleanup.py` 删除临时文件时可能被 `SAFE_DELETE_BULK_CONFIRM_REQUIRED` 拦截而退出非零——**无害**，临时文件下次编译自动覆盖，不要误判为失败。
+- **`verify_urls.py` 需要联网**：本脚本对章节内每个 URL 发起真实 HTTP 请求，必须在「允许出站网络」的环境下运行（本宿主沙箱默认拦截出站 TLS，运行前需放行；若报 `SSL: UNEXPECTED_EOF_WHILE_READING` 多为沙箱拦截而非 URL 真坏）。脚本已内置 `archive.org` 快照兜底——直连返回 202 / 瞬断 SSL 等不可达时自动改查 web.archive.org 稳定镜像，多数 DOI/IEEE/ACM 链接可因此校验通过，无需手写探测脚本。
+- **生成器 / 构建脚本务必写成 `.py` 文件再运行**：合并主控、批量替换占位符等脚本若含反斜杠（正则、`\\` 换行、LaTeX 转义），**不要**在 Bash 里用 heredoc 内联——shell 会吞掉 `\`，导致正则与 LaTeX 转义全部失效。写文件后 `python x.py` 运行。
+- **Git Bash 下 `seq` 不可用**：章节遍历用 Python `for n in range(1, N+1)`，不要 `seq`。
+
 ---
 
 ## 14. 参考文献样式
 
-问题：`book`/`ctexrep` 的 `thebibliography` 默认 `\chapter*{\bibname}`（最大级标题 + 跳页 + 改页眉），导致参考文献独占一页、标题层级过高、页眉被改成「参考文献」。
+### 策略：每章独立、从 [1] 起编
 
-处理：模板已预置 etoolbox 补丁，把 `\chapter*{\bibname}` 重定义为 `\section*{\bibname}`（不跳页、降为 section 级），并去掉 `\@mkboth`（保留原 chapter 页眉）。作者**不需要**在章节源文件里改任何东西——这是 preamble 层的修复。
+- **整书合并时每章参考文献保持独立**，不合并为单一「全书参考文献」。每章自带 `thebibliography`，各自从 [1] 起顺序编号、互不干扰——这是本 skill 的**默认合并策略**（见 § 3 整书模式要点）。
+- **单章写作约定（推荐）**：`\bibitem` **尽量不写可选标签** `[n]`（如 `\bibitem[5]{r5}` 会让编号变成 5、6、8、10 乱序）。省略可选标签，LaTeX 自动从 [1] 顺序编号。`check_balance.py` 已能兼容可选标签写法并自动检出、以「建议」形式提示（非阻断），作者据此确认编号从 [1] 起即可。
+
+### 键全局唯一（作者约定，非脚本缺陷）
+
+- `thebibliography` 环境计数器每章自动重置，所以「编号从 [1] 起」天然成立；但 **bibitem 的键（如 `r1`）必须全书唯一**，否则合并时同名键触发 `multiply-defined` 编译错误。
+- 多章写作时，**给 bibitem 键加章号前缀**（如第 4 章用 `c4r1`、`c4r2`…），这是作者侧的命名约定，不是脚本 bug——键重名是写章节时自己引入的，须由作者保证唯一（或使用合并构建脚本统一加前缀）。
+- `fix_labels.py` 只去重跨章 `\label`，**不处理** `\bibitem` 键；不要把 bibitem 键冲突误归因于脚本（详见 § 16.E）。
+
+### 降级 patch（preamble 层，作者无需改源文件）
+
+模板已预置 etoolbox 补丁，把 `thebibliography` 默认的 `\chapter*{\bibname}`（最大级标题 + 跳页 + 改页眉）重定义为 `\section*{\bibname}`（不跳页、降为 section 级），并去掉 `\@mkboth`（保留原 chapter 页眉）。作者**不需要**在章节源文件里改任何东西——这是 preamble 层的修复。
 
 ---
 
@@ -399,9 +445,11 @@ PowerShell 下某些情况的 exit 1 是伪信号。判定成功与否看「PDF 
 
 ### E. 引用与参考文献类
 
-- `LaTeX Warning undefined references`：`\cite{refN}` 缺对应 `\bibitem` → 补。
-- `multiply-defined`：同一 `\label` 跨章重名，`\ref` 指向错误编号 → 整书合并前跑 `fix_labels.py` 按章重命名。
+- `LaTeX Warning undefined references`：`\cite{key}` 在本章内缺对应 `\bibitem` → 补（单章 SOP § 6 step 6 已卡）。
+- `multiply-defined` 之 `\label` 跨章重名：`\ref` 指向错误编号 → 整书合并前跑 `fix_labels.py` 按章重命名。
+- `multiply-defined` 之 `\bibitem` 键跨章重名：这是**作者命名约定问题**（键必须全书唯一，多章写作时加章号前缀如 `c4r1`），**不是脚本缺陷**；`fix_labels.py` 只处理 `\label`，不处理 bibitem 键。键重名由写章节时引入，须作者保证唯一（或合并构建脚本统一加前缀）。
 - 参考文献独占一页 + 标题为 chapter 级：book 类默认 → 模板已用 etoolbox patch 降级（§ 14）。
+- 杜绝使用 `\bibitem[5]{r5}` 这类可选标签，让 LaTeX 自动从 [1] 顺序编号（§ 14）。
 
 ### F. URL 与超链接类
 
@@ -409,18 +457,19 @@ PowerShell 下某些情况的 exit 1 是伪信号。判定成功与否看「PDF 
 - `\href` 显示文本中 `_` 触发 `Missing $ inserted`：raw URL 里的下划线进了 math mode → 显示文本必须转义（§ 12）。
 - 所有链接点击无反应：误用 `\let\url\nolinkurl` 杀掉了超链接 → 不要用。
 - 中文 URL 显示豆腐 U+FFFD：`url.sty` 在 math mode 渲染，xeCJK 不接管 → 模板已重写 `\Url@FormatString` 去掉 math mode（§ 12）。
+- DOI/IEEE/ACM 链接直连 202 或 SSL EOF：多为站点反爬/证书瞬断，非 URL 错误 → `verify_urls.py` 已自动改查 `archive.org` 快照作为稳定镜像；若仍失败再换源（出版社镜像、arXiv、作者主页等）。
 
 ### G. 排版溢出类
 
 - `Overfull \hbox`：段落 / 显示公式 / 节点文字超宽 → 缩短内容、显示公式改用 `aligned` 拆行、节点内 `\\` 断行。
-- `Underfull \hbox`：仅松散度警告，不阻断，过多时可顺手优化。
+- `Underfull \hbox`：仅松散度警告，不阻断。其数量与正文内容量正相关，排版过松时可顺手用 `\sloppy` 或微调 `\XeTeXlinebreakskip` 优化，非强制。
 - 段落偶发微小超宽：个别长英文词 / URL 顶到右边距 → preamble 已加 `\emergencystretch{3.5em}` 吸收；仍超则手改源码。
 
 ### H. 编译环境 / 进程类
 
 - `xdvipdfmx:fatal: Unable to open "main.pdf"`：PDF 被阅读器锁 → 关闭阅读器或 `-jobname book` 绕开（§ 13）。
 - 单行章节文件 `\input` 失败：无换行导致 silent parse 损坏 → `fix.py` 在 `\section` 前后补换行；章节源文件务必正常换行。
-- 第二次跑 SOP 找不到 `verify_urls.py`：误删常驻脚本 → 不要把 `verify_urls.py` 当一次性文件清理。
+- 第二次跑 SOP 找不到 `verify_urls.py` / `find_urls.py`：误删常驻脚本 → `cleanup.py` 只删 `chN.tex` 与 `_tmp.*`，**不删任何 `.py` 脚本**（两者均为常驻脚本，见 § 8）。不要把脚本当一次性文件清理。
 
 ### I. 工作流 / 阅读类
 

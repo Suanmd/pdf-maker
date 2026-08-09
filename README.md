@@ -30,7 +30,7 @@ pdf-maker/
 ├── assets/
 │   ├── templates/          # LaTeX 模板
 │   │   ├── main.tex        #   整书主控
-│   │   ├── _tmp.tex        #   单章 preamble（由 fix.py 复用）
+│   │   ├── _tmp.tex        #   单章编译入口（preamble 来自 assets/templates/_tmp.tex 模板）
 │   │   └── url-href.tex    #   中文 URL 写法参考
 │   └── examples/           # 工作流辅助模板
 │       └── chapter_init_notes_template.md
@@ -59,7 +59,7 @@ pdf-maker/
 
 ### 2. 安装 skill
 
-将本目录放到 skill 加载路径下即可（具体位置取决于你使用的宿主环境）。
+将本目录（含 `SKILL.md` / `scripts/` / `assets/` 的这个根目录）放到 skill 加载路径下（例如 `~/.workbuddy/skills/pdf-maker/`）。下文统一用 **`<PDF_MAKER>`** 指代该安装根目录——它装在哪都行，与你的书稿项目位置无关。
 
 ### 3. 新建项目
 
@@ -67,31 +67,36 @@ pdf-maker/
 mkdir my-report
 cd my-report
 mkdir figures 第1章 第2章 第3章
-# 复制 pdf-maker/assets/templates/main.tex 到 ./main.tex
-# 复制 pdf-maker/assets/examples/chapter_init_notes_template.md 作为笔记模板
+# 从 <PDF_MAKER>/assets/templates/ 复制 main.tex 到项目根 ./main.tex
+# 从 <PDF_MAKER>/assets/examples/ 复制 chapter_init_notes_template.md 作为笔记模板
 ```
 
 ### 4. 写一章
 
-按 [SKILL.md § 6](SKILL.md#6-单章编译-sop) 走完整 SOP：
+按 [SKILL.md § 6](SKILL.md#6-单章编译-sop) 走完整 SOP。**在「书稿项目根目录（下称 `<PROJECT>`）」下执行脚本即可，无需把脚本或模板复制进项目**——`fix.py` 会从脚本自身的安装目录（`scripts/` 的上一级）向上定位 `assets/templates/_tmp.tex` 作为单章 preamble 唯一真源，因此 skill 装在任意路径都不影响。
 
 ```bash
-cd 第1章
-# 从 pdf-maker/scripts/ 复制 fix.py / verify_urls.py / check.py / check_balance.py / cleanup.py
-python fix.py 1
-python verify_urls.py 1
-python check.py 1 && python check_balance.py 1
-xelatex -halt-on-error -interaction=nonstopmode _tmp.tex
-xelatex -halt-on-error -interaction=nonstopmode _tmp.tex
-python cleanup.py 1
+# 约定：<PDF_MAKER> = skill 安装根目录（如 ~/.workbuddy/skills/pdf-maker）
+#       <PROJECT>  = 你的书稿项目根目录（含 第N章/ 子目录与 main.tex）
+# skill 装在哪都行，与项目位置无关；脚本全部从 <PROJECT> 执行。
+cd <PROJECT>
+python <PDF_MAKER>/scripts/fix.py 1
+python <PDF_MAKER>/scripts/verify_urls.py 1
+python <PDF_MAKER>/scripts/check.py 1 && python <PDF_MAKER>/scripts/check_balance.py 1
+xelatex -halt-on-error -interaction=nonstopmode 第1章/_tmp.tex
+xelatex -halt-on-error -interaction=nonstopmode 第1章/_tmp.tex
+python <PDF_MAKER>/scripts/check_overflow.py 第1章/_tmp.log
+python <PDF_MAKER>/scripts/cleanup.py 1
 ```
+
+也可以先 `cd <PROJECT>/第1章` 再执行（脚本会从当前目录定位源文件与模板），但推荐始终在 `<PROJECT>` 根目录执行以保持一致。`check_overflow.py` 若不传日志路径，会在当前目录自动寻找 `_tmp.log` / `main.log` / `book.log`。
 
 ### 5. 整书合并
 
 所有章节 OK 后，按 [SKILL.md § 7](SKILL.md#7-整书合并-sop)：
 
 ```bash
-cd ..
+# 在 <PROJECT> 根目录执行（与 § 4 一致，不要 cd 进章目录）
 xelatex -halt-on-error -interaction=nonstopmode main.tex
 xelatex -halt-on-error -interaction=nonstopmode main.tex
 ```

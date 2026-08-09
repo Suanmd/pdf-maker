@@ -10,7 +10,14 @@
 - 中文字数（去除表格 / 图 / verbatim 块后的正文）。
 - TeX 字节数。
 - 章节层级计数：chapter / section / subsection / subsubsection。
-- 元素计数：tikz 图、table、verbatim、multirow、bibitem、url。
+- 元素计数：tikz 图、table、verbatim、multirow、bibitem、链接（url + href）。
+
+路径解析规则
+------------
+与 fix.py 一致：依次尝试
+``<CWD>/第N章/第N章.tex`` → ``<CWD>/第N章.tex`` →
+``<脚本目录>/第N章/第N章.tex`` → ``<脚本目录>/第N章.tex``。
+支持附录：``python check.py 附录A``。
 
 是否调用 / 何时调用
 ------------------
@@ -19,8 +26,9 @@
 用法：
     python check.py [CH_NUM]          # 默认第 1 章
     python check.py 3
+    python check.py 附录A
 
-退出码：始终为 0（统计用途，不判定失败）。
+退出码：0（统计用途，不判定失败）；源文件缺失时非零。
 """
 import re
 import sys
@@ -35,11 +43,22 @@ except (AttributeError, OSError):
 HERE = Path(__file__).parent
 
 
+def resolve_source(arg: str, tool: str) -> Path:
+    """定位章节 / 附录源文件（CWD 优先，脚本目录兜底）。"""
+    stem = arg if arg.startswith("附录") else f"第{arg}章"
+    tried = []
+    for base in (Path.cwd(), HERE):
+        for cand in (base / stem / f"{stem}.tex", base / f"{stem}.tex"):
+            tried.append(cand)
+            if cand.exists():
+                return cand
+    lines = "\n".join(f"    {p}" for p in dict.fromkeys(tried))
+    raise SystemExit(f"[{tool}] 找不到 {stem}.tex，已尝试以下位置：\n{lines}")
+
+
 def main() -> int:
-    CH_NUM = int(sys.argv[1]) if len(sys.argv) > 1 else 1
-    SRC = HERE / f"第{CH_NUM}章.tex"
-    if not SRC.exists():
-        raise SystemExit(f"[check.py] 找不到: {SRC}")
+    arg = sys.argv[1] if len(sys.argv) > 1 else "1"
+    SRC = resolve_source(arg, "check.py")
 
     CONTENT = SRC.read_text(encoding="utf-8")
 
@@ -47,8 +66,14 @@ def main() -> int:
     no_code = re.sub(r"\\begin\{verbatim\}.*?\\end\{verbatim\}", "", CONTENT, flags=re.DOTALL)
     no_code = re.sub(r"\\begin\{table\}.*?\\end\{table\}", "", no_code, flags=re.DOTALL)
     no_code = re.sub(r"\\begin\{tikzpicture\}.*?\\end\{tikzpicture\}", "", no_code, flags=re.DOTALL)
+    # 去除 \verb|...| 逐字内容，避免其中的 \url/\href 字样被误计
+    no_code = re.sub(r"\\verb([^a-zA-Z]).*?\1", "", no_code, flags=re.DOTALL)
 
     chinese = re.findall(r"[\u4e00-\u9fff]", no_code)
+    n_url = len(re.findall(r"\\url\{", CONTENT))
+    n_href = len(re.findall(r"\\href\{", CONTENT))
+
+    print(f"源文件: {SRC}")
     print(f"中文字数: {len(chinese)}")
     print(f"TeX 字节: {len(CONTENT)}")
     print(f"chapter:         {CONTENT.count(r'\chapter{')}")
@@ -59,8 +84,8 @@ def main() -> int:
     print(f"table:           {CONTENT.count(r'\begin{table}')}")
     print(f"verbatim:        {CONTENT.count(r'\begin{verbatim}')}")
     print(f"multirow:        {CONTENT.count(r'\multirow{')}")
-    print(f"bibitem:         {CONTENT.count(r'\bibitem{')}")
-    print(f"url:             {len(re.findall(r'\\url\{', CONTENT))}")
+    print(f"bibitem:         {len(re.findall(r'\\bibitem', CONTENT))}")
+    print(f"链接:            {n_url + n_href}  (url {n_url} + href {n_href})")
     return 0
 
 

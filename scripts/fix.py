@@ -3,8 +3,8 @@
 
 用途
 ----
-把作者手写的章节源文件（默认 `第N章.tex` 或 `附录X/附录X.tex`）转换为可直接交给
-xelatex 编译的成品，并生成单章独立编译所需的 `_tmp.tex`（含完整 preamble）。
+把作者手写的章节源文件（标准 `第N章/第N章.tex`，兼容旧扁平 `第N章.tex`；附录 `附录X/附录X.tex`）转换为可直接交给
+xelatex 编译的成品，并读取 `assets/templates/_tmp.tex` 模板生成单章独立编译所需的 `_tmp.tex`（preamble 唯一真源）。
 
 它会批量修复几类常见、且“编译期才暴露”的中文 LaTeX 坑，避免临时手工改源码。
 
@@ -15,18 +15,33 @@ xelatex 编译的成品，并生成单章独立编译所需的 `_tmp.tex`（含�
 2. 图片宽度上限：给每个 ``tikzpicture`` 套 ``adjustbox{max width=\\textwidth}``，
    只缩放超宽图，正常图保持原样。
 3. 写入英文名中间文件 ``chN.tex``（避免中文文件名在部分工具链下乱码）。
-4. 生成 ``_tmp.tex``：注入与整书模板同源的 preamble 补丁（参考文献降级、
-   中文 URL 支持、代码块环境、防溢出等）。
+4. 生成 ``_tmp.tex``：读取 ``assets/templates/_tmp.tex`` 模板（单章编译
+   preamble 的唯一真源，含参考文献降级、中文 URL 支持、代码块环境、防溢出等
+   补丁），将其中的 ``\\input{CHAPTER_TEX}`` 占位行替换为实际章节中间文件名后写出。
+
+中间文件与成品统一写在「源文件所在目录」，因此章目录始终自包含。
+
+路径解析规则（重要）
+--------------------
+按以下顺序查找章节源文件，第一个命中即用：
+
+    1. <当前工作目录>/第N章/第N章.tex     ← 标准子目录布局（推荐）
+    2. <当前工作目录>/第N章.tex           ← 旧扁平布局
+    3. <脚本所在目录>/第N章/第N章.tex     ← 脚本被复制进项目时的兜底
+    4. <脚本所在目录>/第N章.tex
+
+因此只需从书稿项目根目录用 skill 的实际安装路径调用即可（如
+``python /path/to/skill/scripts/fix.py 3``，skill 装在哪都行），也可 ``cd 第3章`` 后执行同一命令，无需把脚本复制到项目里。
 
 是否调用 / 何时调用
 ------------------
 由单章编译 SOP 在「写正文之后、xelatex 之前」调用，每章必跑（不可替代）。
 用法：
-    python fix.py [CH_NUM]          # 默认处理 ./第1章.tex
-    python fix.py 3                 # 处理 ./第3章.tex
-    python fix.py 附录A             # 处理 ./附录A/附录A.tex
+    python fix.py [CH_NUM]          # 默认处理第 1 章
+    python fix.py 3                 # 处理第 3 章
+    python fix.py 附录A             # 处理附录 A
 
-退出码：0 成功；源文件缺失时非零退出。
+退出码：0 成功；源文件缺失、模板缺失或模板损坏时非零退出。
 """
 import re
 import sys
@@ -43,19 +58,37 @@ except (AttributeError, OSError):
 HERE = Path(__file__).parent
 ARG = sys.argv[1] if len(sys.argv) > 1 else "1"
 
-if ARG.startswith("附录"):
-    CH_NUM = ARG
-    SRC = HERE / ARG / f"{ARG}.tex"
-    DST = HERE / ARG / f"{ARG}_ch.tex"
-    TMP = HERE / ARG / "_tmp.tex"
-else:
-    CH_NUM = ARG
-    SRC = HERE / f"第{CH_NUM}章.tex"
-    DST = HERE / f"ch{CH_NUM}.tex"
-    TMP = HERE / "_tmp.tex"
+# 占位行：模板里唯一会被替换成真实章节文件名的地方
+PLACEHOLDER = "CHAPTER_TEX"
 
-if not SRC.exists():
-    raise SystemExit(f"[fix.py] 找不到源文件: {SRC}")
+
+def resolve_source(arg: str):
+    """定位章节 / 附录源文件。
+
+    返回 (源文件路径, 中间文件名)。找不到时抛 SystemExit 并列出全部尝试路径。
+    """
+    if arg.startswith("附录"):
+        stem, mid_name = arg, f"{arg}_ch.tex"
+    else:
+        stem, mid_name = f"第{arg}章", f"ch{arg}.tex"
+
+    tried = []
+    for base in (Path.cwd(), HERE):
+        for cand in (base / stem / f"{stem}.tex", base / f"{stem}.tex"):
+            tried.append(cand)
+            if cand.exists():
+                return cand, mid_name
+
+    lines = "\n".join(f"    {p}" for p in dict.fromkeys(tried))
+    raise SystemExit(
+        f"[fix.py] 找不到 {stem}.tex，已尝试以下位置：\n{lines}\n"
+        f"    提示：在项目根目录执行（推荐），或 cd 进章目录后再执行。"
+    )
+
+
+SRC, MID_NAME = resolve_source(ARG)
+DST = SRC.parent / MID_NAME
+TMP = SRC.parent / "_tmp.tex"
 
 
 def url_to_href(text: str) -> str:
@@ -110,87 +143,55 @@ def wrap_tikz(text: str) -> str:
     return "".join(out)
 
 
-# ---- 1. URL 规范化 ----
-text = url_to_href(SRC.read_text(encoding="utf-8"))
+def find_template() -> Path | None:
+    """向上查找 assets/templates/_tmp.tex（脚本目录与 CWD 两条路径都试）。"""
+    for start in (HERE, Path.cwd()):
+        d = start.resolve()
+        for _ in range(6):
+            cand = d / "assets" / "templates" / "_tmp.tex"
+            if cand.exists():
+                return cand
+            if d.parent == d:
+                break
+            d = d.parent
+    return None
 
-# ---- 2. 图片宽度上限 ----
-text = wrap_tikz(text)
 
-# ---- 3. 写出英文名中间文件 ----
-DST.write_text(text, encoding="utf-8")
+def main() -> int:
+    # ---- 1. URL 规范化 ----
+    text = url_to_href(SRC.read_text(encoding="utf-8"))
 
-# ---- 4. 生成单章编译 preamble (_tmp.tex) ----
-# 与 assets/templates/main.tex 同源；集中放置所有编译期补丁，避免分散到章节源文件。
-PREAMBLE = r"""\documentclass[a4paper, 11pt]{ctexrep}
-\usepackage{amsmath,amssymb}
-\usepackage{graphicx}
-\usepackage{booktabs}
-\usepackage{multirow}
-\usepackage{array}
-\usepackage{longtable}
-\usepackage{tabularx}
-\usepackage[unicode]{hyperref}
-\usepackage{indentfirst}
-\usepackage{xcolor}
-\usepackage{xeCJK}
-\usepackage{tikz}
-\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds, calc}
-\usepackage{adjustbox}
-\usepackage{tcolorbox}
-\tcbuselibrary{listings, skins, breakable}
-\usepackage{enumitem}
-\usepackage{url}
-\usepackage{etoolbox}
+    # ---- 2. 图片宽度上限 ----
+    text = wrap_tikz(text)
 
-% === 中文 URL 支持 ===
-% url.sty 默认在 math mode 渲染 URL，xeCJK 不接管 math mode，中文会变成豆腐块。
-% 重写 \Url@FormatString 去掉 math mode，中文走正常字体分类即可正常显示。
-\makeatletter
-\def\Url@FormatString{%
- \UrlFont
- \expandafter\UrlLeft\Url@String\UrlRight
-}
-\makeatother
+    # ---- 3. 写出英文名中间文件 ----
+    DST.write_text(text, encoding="utf-8")
 
-% === 参考文献降级 + 不跳页 + 不改页眉 ===
-% book/ctexrep 的 thebibliography 默认 \chapter*（最大级标题 + 跳页 + 改页眉）。
-% 重定义为 \section*，并去掉 \@mkboth，使其与正文页眉保持一致。
-\makeatletter
-\patchcmd{\thebibliography}{\chapter*{\bibname}}{\section*{\bibname}}{}{}
-\patchcmd{\thebibliography}{\@mkboth{\MakeUppercase\bibname}{\MakeUppercase\bibname}}{}{}{}
-\makeatother
+    # ---- 4. 生成单章编译入口 _tmp.tex ----
+    # 单章编译 preamble 的唯一真源是 assets/templates/_tmp.tex（与整书 main.tex 同步关键补丁）。
+    # 这里只读取模板，把 \input{CHAPTER_TEX} 占位行替换为实际中间文件名，避免 preamble 双源漂移。
+    tpl = find_template()
+    if tpl is None:
+        raise SystemExit(
+            "[fix.py] 找不到 assets/templates/_tmp.tex；请保持 skill 目录结构完整"
+            "（scripts/ 与 assets/ 同级），或在项目根放一份 assets/templates/_tmp.tex。"
+        )
+    tpl_text = tpl.read_text(encoding="utf-8")
 
-% === 代码块环境：浅灰打底 + 自动换行 ===
-% 用 tcolorbox + listings 引擎（\newtcblisting），才能 breaklines 自动折行长代码行。
-% 禁用裸 \verbatim（不折行会溢出页面）。
-\newtcblisting{codeblock}{
-  colback=gray!10!white, colframe=gray!45!white, boxrule=0.4pt,
-  arc=3pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
-  listing only, breakable,
-  listing options={
-    breaklines=true, breakatwhitespace=true,
-    basicstyle=\small\ttfamily, showstringspaces=false,
-    frame=none, numbers=none, aboveskip=0pt, belowskip=0pt
-  }
-}
+    # 只替换 \input{占位符} 这一处，注释中出现的占位符字样不受影响
+    target = "\\input{" + PLACEHOLDER + "}"
+    if target not in tpl_text:
+        raise SystemExit(
+            f"[fix.py] 模板 {tpl} 缺少占位行 {target}，无法生成单章编译入口。"
+        )
+    tpl_text = tpl_text.replace(target, "\\input{" + DST.name + "}")
+    TMP.write_text(tpl_text, encoding="utf-8")
 
-% === 防溢出：吸收段落级微小超宽 ===
-% 不能解决 TikZ 节点不可断词 / 显示公式超宽——那些须改源码。
-\setlength{\emergencystretch}{3.5em}
+    print(f"[fix.py] 源: {SRC} -> 中间文件: {DST.name} ({DST.stat().st_size} bytes)")
+    print(f"[fix.py] 单章编译入口: {TMP} ({TMP.stat().st_size} bytes)")
+    print("[fix.py] 下一步: xelatex -halt-on-error -interaction=nonstopmode _tmp.tex")
+    return 0
 
-\XeTeXlinebreaklocale "zh"
-\XeTeXlinebreakskip=0pt
-\graphicspath{{figures/}}
-\DeclareGraphicsExtensions{.pdf,.png,.jpg}
-\hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
 
-\begin{document}
-\input{""" + DST.name + r"""}
-\end{document}
-"""
-
-TMP.write_text(PREAMBLE, encoding="utf-8")
-
-print(f"[fix.py] 源: {SRC} -> 中间文件: {DST.name} ({DST.stat().st_size} bytes)")
-print(f"[fix.py] 单章编译入口: {TMP.name} ({TMP.stat().st_size} bytes)")
-print("[fix.py] 下一步: xelatex -halt-on-error -interaction=nonstopmode _tmp.tex")
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,10 +1,12 @@
-% _tmp.tex - 单章独立编译模板
+% _tmp.tex - 单章独立编译模板（preamble 唯一真源）
 %
-% 由 fix.py 自动复制并写入实际的章节中间文件名（chN.tex / 附录X_ch.tex），
-% 然后作为 `_tmp.tex` 交给 xelatex 编译。作者一般不需要手动改动本文件。
+% 本文件是单章编译 preamble 的唯一真源。fix.py 读取本文件，将占位符
+% CHAPTER_TEX 替换为实际章节中间文件名（chN.tex / 附录X_ch.tex），
+% 写出章节目录下的 _tmp.tex 并交给 xelatex 编译。作者一般不需要手动改动本文件。
 %
-% 它包含与 main.tex 同源的关键补丁：中文 URL 支持、参考文献降级、
+% 它与整书模板 main.tex 同步关键补丁：中文 URL 支持、参考文献降级、
 % 代码块环境、图片宽度上限、防溢出。集中放这里，章节源文件保持干净。
+% 注意：不要在 fix.py 内再内联一份副本，否则会双源漂移（见 SKILL.md § 3）。
 
 \documentclass[a4paper, 11pt]{ctexrep}
 \usepackage{amsmath,amssymb}
@@ -53,7 +55,7 @@
   arc=3pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
   listing only, breakable,
   listing options={
-    breaklines=true, breakatwhitespace=true,
+    breaklines=true, breakatwhitespace=false,
     basicstyle=\small\ttfamily, showstringspaces=false,
     frame=none, numbers=none, aboveskip=0pt, belowskip=0pt
   }
@@ -63,5 +65,5 @@
 \setlength{\emergencystretch}{3.5em}
 
 \begin{document}
-\input{chN.tex}    % ← fix.py 自动替换为 ch1.tex / ch2.tex / 附录A_ch.tex
+\input{CHAPTER_TEX}    % ← fix.py 会把这一行替换为实际章节中间文件（ch1.tex / 附录A_ch.tex 等）
 \end{document}

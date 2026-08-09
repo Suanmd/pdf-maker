@@ -4,7 +4,46 @@
 
 ---
 
-## 当前版本（开源重构版）
+## V1.1.0
+> 提升脚本鲁棒性、日志检测精度、引用/链接校验能力，统一文档占位符规范。
+
+### 📂 路径与调用模式（核心重构）
+1. **脚本相对路径规范**
+    - 引入统一占位符：`<PDF_MAKER>`=skill真实安装根目录、`<PROJECT>`=书稿项目根目录。
+    - 调用范式统一：在书稿项目根目录执行 `python <PDF_MAKER>/scripts/fix.py N`，不再要求复制脚本、模板到书稿项目内。
+    - 脚本定位规则：源文件从**当前工作目录(CWD)**查找；模板、内部资源从**skill自身安装目录**读取。
+2. **全脚本路径解析统一补齐**
+    - `verify_urls.py` / `cleanup.py` / `find_urls.py` 废弃旧 workaround，对齐 `fix.py/check.py/check_balance.py` 逻辑：**当前工作目录优先，脚本所在目录兜底**。解决从项目根目录运行找不到章节tex文件的历史问题。
+
+### 🔍 检测逻辑精度 & 健壮性修复
+1. **排版溢出日志 `check_overflow.py`**
+    - 修复正则缺陷：旧正则无法捕获 `\hbox`/`\vbox` 溢出行，替换为多行模式 `^Overfull.*$`，完整输出行号明细。
+    - 修复捕获组缺失导致 `IndexError` 崩溃，改用完整匹配 `m.group(0)`。
+    - 计数逻辑改为精确匹配：`Overfull \hbox` / `Overfull \vbox` / `Underfull \hbox` / `Underfull \vbox`，过滤日志描述语句（如 `No Overfull or Underfull boxes reported.`），避免统计虚高。
+2. **引用与参考文献检测 `check.py` / `check_balance.py`**
+    - `\bibitem` 改用正则解析，同时兼容 `\bibitem{key}`、`\bibitem[label]{key}` 带标签写法，不再漏计数。
+    - 新增检测：**孤儿bibitem（有定义无引用）、悬空\cite（有引用无条目）**，提前发现参考文献断链。
+    - 增加 `\verb|...|` 内容剥离：统计链接、引用前剔除verb环境，防止样例代码内 `\cite{}`、`\url{}` 被误判为真实命令，消除误报孤儿/悬空引用。
+3. **链接校验 `verify_urls.py`**
+    - 增加 `archive.org` 快照自动兜底：遇到202、SSL EOF等访问失败，自动查询网页存档镜像，修复大量DOI、IEEE、ACM死链。
+    - 补全缺失 `import json`，增加模块级SSL上下文。
+4. **清理脚本 `cleanup.py`**
+    - 修复误删除常驻脚本 `find_urls.py` 的bug；清理范围限定为章节文件 `chN.tex` 与临时文件 `_tmp.*`，所有py脚本保留。
+
+### 🧩 fix.py 编译模板逻辑优化
+- 移除fix.py内置preamble硬编码，改为读取模板文件 `assets/templates/_tmp.tex`，替换占位符生成编译临时文件，消除双源不一致问题。
+- 更新模板内部注释，同步更新 README、SKILL.md 文档描述。
+
+### 📖 文档同步更新
+- README、SKILL.md 多处替换为 `<PDF_MAKER>` / `<PROJECT>` 占位符，删除旧相对路径示例。
+- SKILL.md 补充说明：
+  - `verify_urls` 需要联网，沙箱环境需放行网络访问
+  - `archive.org` 镜像兜底机制
+  - `find_urls.py` 属于常驻脚本，不属于清理目标
+
+---
+
+## v1.0.0
 
 ### 工程化与开源标准化
 
