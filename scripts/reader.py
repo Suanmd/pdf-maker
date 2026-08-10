@@ -37,11 +37,9 @@ import re
 import argparse
 from pathlib import Path
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
-except (AttributeError, OSError):
-    pass
+from common import setup_utf8
+
+setup_utf8()
 
 # 容量参数：单 chunk 行数上限与单 read 字节上限
 CHUNK_SIZE_CN = 200
@@ -254,7 +252,20 @@ def cmd_toc(file: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="reader.py", description="素材强制阅读三阶段校验工具")
+    parser = argparse.ArgumentParser(
+        prog="reader.py",
+        description="素材强制阅读三阶段校验工具",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "示例（本项目）:\n"
+            "  python reader.py index  \"<素材 report.md 路径>\"\n"
+            "  python reader.py chunk  \"<素材 report.md 路径>\" 0\n"
+            "  python reader.py chunk  \"<素材 report.md 路径>\" 1   # 逐块读完所有 chunk\n"
+            "  python reader.py verify \"<素材 report.md 路径>\"     # 5 字段全过才算读完\n\n"
+            "说明: <file> 必须是真实素材报告路径（如 .../deep-search/xxx/report.md）。\n"
+            "      verify 前必须先 index + 逐 chunk 读完，缺一步 verify 会直接 FAIL。"
+        ),
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_index = sub.add_parser("index", help="总览 + 初始化阅读状态")
     p_index.add_argument("file")

@@ -4,8 +4,9 @@
 % 参考文献样式、代码块、图片宽度上限等。章节源文件无需关心这些全局设置。
 %
 % 使用步骤：
-%   1. 替换所有 {{XXX}} 占位符（TITLE / SUBTITLE / EPIGRAPH / AUTHOR / DATE / PROJECT / PDF_TITLE）。
+%   1. 替换所有 {{XXX}} 占位符（TITLE / SUBTITLE / EPIGRAPH / EPIGRAPH_CLOSING / AUTHOR / DATE / PROJECT / PDF_TITLE）。
 %      - {{TITLE}} 用于扉页显示，可含 \\ 换行；{{PDF_TITLE}} 用于 PDF 元数据，必须单行、不含 \\。
+%      - {{EPIGRAPH_CLOSING}} 用于结尾段引文（可选，留空则整段删除）。
 %   2. 在下方“正文各章”处的章节列表占位符中，每章写一行 \input{第N章/第N章}。
 %   3. 若不需要扉页 / 序言 / 附录 / 结尾段，删除对应整块。
 %   4. xelatex 跑两遍（第二遍解析交叉引用）。
@@ -93,7 +94,7 @@
   arc=3pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
   listing only, breakable,
   listing options={
-    breaklines=true, breakatwhitespace=true,
+    breaklines=true, breakatwhitespace=false,
     basicstyle=\small\ttfamily, showstringspaces=false,
     frame=none, numbers=none, aboveskip=0pt, belowskip=0pt
   }

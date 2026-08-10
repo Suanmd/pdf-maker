@@ -33,11 +33,9 @@ from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import re
 
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
-except (AttributeError, OSError):
-    pass
+from common import setup_utf8
+
+setup_utf8()
 
 # 时区（用于 verified_at 时间戳，可按需调整）
 TZ = timezone(timedelta(hours=8))
@@ -61,15 +59,6 @@ def materials_path(project_dir: str) -> Path:
 
 def map_path() -> Path:
     return Path(__file__).parent / "materials.map.json"
-
-
-def detect_project_dir() -> str:
-    """启发式：向上寻找含 main.tex 的目录。"""
-    cwd = Path.cwd()
-    for cand in [cwd, *cwd.parents]:
-        if (cand / "main.tex").exists():
-            return str(cand)
-    return str(cwd)
 
 
 def find_search_root() -> Path:
@@ -294,18 +283,42 @@ def cmd_bib_audit(project_dir: str) -> int:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="track_materials.py")
+    p = argparse.ArgumentParser(
+        prog="track_materials.py",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "示例:\n"
+            "  python track_materials.py init   \"<PROJECT_DIR>\"\n"
+            "  python track_materials.py show   \"<PROJECT_DIR>\"\n"
+            "  python track_materials.py check  \"<PROJECT_DIR>\" 第4章\n"
+            "  python track_materials.py update \"<PROJECT_DIR>\" 第4章 123456 1000 5\n"
+            "  python track_materials.py bib-audit \"<PROJECT_DIR>\"\n\n"
+            "注意:\n"
+            "  - <PROJECT_DIR> 为你的图书项目根目录（含 materials.json 与各 第N章/ 子目录），\n"
+            "    不限定具体盘符或路径，按你的实际环境填写即可。\n"
+            "  - check / update 必须同时传 <project_dir> 和 <chapter>（缺一不可）。\n"
+            "  - update 的三个整数取自 reader.py verify 输出:\n"
+            "      <size_bytes>   文件字节数   (verify 的 size_bytes)\n"
+            "      <total_lines>  总行数\n"
+            "      <chunks_count> 已读 chunk 数 (verify 的 chunks_read 数)"
+        ),
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
-    p_init = sub.add_parser("init"); p_init.add_argument("project_dir")
-    p_show = sub.add_parser("show"); p_show.add_argument("project_dir")
-    p_check = sub.add_parser("check"); p_check.add_argument("project_dir"); p_check.add_argument("chapter")
+    p_init = sub.add_parser("init"); p_init.add_argument("project_dir", help="书稿项目根目录（含 materials.json）")
+    p_show = sub.add_parser("show"); p_show.add_argument("project_dir", help="书稿项目根目录")
+    p_check = sub.add_parser("check")
+    p_check.add_argument("project_dir", help="书稿项目根目录")
+    p_check.add_argument("chapter", help="章节名，如 第4章")
     p_update = sub.add_parser("update")
-    p_update.add_argument("project_dir"); p_update.add_argument("chapter")
-    p_update.add_argument("size_bytes", type=int); p_update.add_argument("total_lines", type=int)
-    p_update.add_argument("chunks_count", type=int)
+    p_update.add_argument("project_dir", help="书稿项目根目录")
+    p_update.add_argument("chapter", help="章节名，如 第4章")
+    p_update.add_argument("size_bytes", type=int, help="文件字节数（reader.py verify 的 size_bytes）")
+    p_update.add_argument("total_lines", type=int, help="素材总行数")
+    p_update.add_argument("chunks_count", type=int, help="已读 chunk 数（reader.py verify 的 chunks_read 数）")
     p_auto = sub.add_parser("auto-init")
-    p_auto.add_argument("project_dir"); p_auto.add_argument("chapter")
-    p_audit = sub.add_parser("bib-audit"); p_audit.add_argument("project_dir")
+    p_auto.add_argument("project_dir", help="书稿项目根目录")
+    p_auto.add_argument("chapter", help="章节名，如 第4章")
+    p_audit = sub.add_parser("bib-audit"); p_audit.add_argument("project_dir", help="书稿项目根目录")
 
     args = p.parse_args()
     if args.cmd == "init":
