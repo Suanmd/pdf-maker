@@ -6,9 +6,9 @@
 %
 % 它与整书模板 main.tex 同步关键补丁：中文 URL 支持、参考文献降级、
 % 代码块环境、图片宽度上限、防溢出。集中放这里，章节源文件保持干净。
-% 注意：不要在 fix.py 内再内联一份副本，否则会双源漂移（见 SKILL.md § 9）。
+% 注意：不要在 fix.py 内再内联一份副本，否则会双源漂移。
 
-\documentclass[a4paper, 11pt]{ctexrep}
+\documentclass[a4paper, 11pt, twoside]{ctexrep}
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
 \usepackage{booktabs}
@@ -28,41 +28,36 @@
 \usepackage{enumitem}
 \usepackage{url}
 \usepackage{etoolbox}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{fancyhdr}
 
-% === 中文 URL 支持 ===
-\makeatletter
-\def\Url@FormatString{%
- \UrlFont
- \expandafter\UrlLeft\Url@String\UrlRight
+% === 页面版式：与整书 main.tex 保持一致（twoside + 2.5cm + fancyhdr） ===
+% 否则单章 PDF 与主控文件格式不一致（用户反馈的合并质量问题之一）。
+\setlength{\headheight}{15pt}
+\pagestyle{fancy}
+\fancyhead[LE,RO]{\slshape\nouppercase{\leftmark}}
+\fancyhead[LO,RE]{\slshape\nouppercase{\rightmark}}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+\fancypagestyle{plain}{%
+  \fancyhf{}%
+  \fancyfoot[C]{\thepage}%
+  \renewcommand{\headrulewidth}{0pt}%
+  \renewcommand{\footrulewidth}{0pt}%
 }
-\makeatother
 
-% === 参考文献降级 + 不跳页 + 不改页眉 ===
-\makeatletter
-\patchcmd{\thebibliography}{\chapter*{\bibname}}{\section*{\bibname}}{}{}
-\patchcmd{\thebibliography}{\@mkboth{\MakeUppercase\bibname}{\MakeUppercase\bibname}}{}{}{}
-\makeatother
+% === 共用补丁片段（唯一真源：templates/_preamble_shared.tex） ===
+% fix 会把本片段内联进模板的对应占位处（中文 URL 支持 / 参考文献降级 /
+% codeblock 环境 / 防溢出），避免与 main.tex 双份手维护导致漂移。
+{{SHARED_PREAMBLE}}
 
 \XeTeXlinebreaklocale "zh"
 \XeTeXlinebreakskip=0pt
 \graphicspath{{figures/}}
 \DeclareGraphicsExtensions{.pdf,.png,.jpg}
 \hypersetup{colorlinks=true, linkcolor=blue, urlcolor=blue, citecolor=blue}
-
-% === 代码块环境：浅灰打底 + 自动换行（禁用裸 \verbatim） ===
-\newtcblisting{codeblock}{
-  colback=gray!10!white, colframe=gray!45!white, boxrule=0.4pt,
-  arc=3pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
-  listing only, breakable,
-  listing options={
-    breaklines=true, breakatwhitespace=false,
-    basicstyle=\small\ttfamily, showstringspaces=false,
-    frame=none, numbers=none, aboveskip=0pt, belowskip=0pt
-  }
-}
-
-% === 防溢出 ===
-\setlength{\emergencystretch}{3.5em}
 
 \begin{document}
 \input{CHAPTER_TEX}    % ← fix.py 会把这一行替换为实际章节中间文件（ch1.tex / 附录A_ch.tex 等）

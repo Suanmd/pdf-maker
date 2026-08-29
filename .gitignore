@@ -2,8 +2,12 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+*.egg-info/
+build/
+dist/
 
-# LaTeX 中间产物（脚本会生成，不入库）
+# LaTeX 中间产物
 *.aux
 *.log
 *.out
@@ -20,6 +24,14 @@ __pycache__/
 _tmp.tex
 _tmp.pdf
 ch[0-9]*.tex
+_build/
+_build_bak*/
+
+!src/pdfmaker/templates/_tmp.tex
+
+# 成品 PDF
+main.pdf
+第*章/*.pdf
 
 # 编辑器 / 系统
 .DS_Store

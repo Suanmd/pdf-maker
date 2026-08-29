@@ -1,21 +1,25 @@
 # -*- coding: utf-8 -*-
-"""reader.py - 素材强制阅读的「三阶段」校验工具。
+"""reader —— 素材强制阅读的「三阶段」校验工具。
 
-用途
-----
 在动笔写一个章节之前，确保对应素材已被「逐块完整通读」，而不是只读前几行、
 grep 摘要或凭记忆下笔。本工具负责「读单个素材文件」的全流程校验。
 
 子命令
 ------
-    python reader.py index  <file>             # 总览 + 初始化阅读状态
-    python reader.py chunk  <file> N [--reset] # 读第 N 个 chunk（0-based）
-    python reader.py verify <file>             # 校验 5 字段，全过才算读完
-    python reader.py toc    <file>             # 仅打印标题树（不计 chunk）
+    python -m pdfmaker reader index  <file>             # 总览 + 初始化阅读状态
+    python -m pdfmaker reader chunk  <file> N [--reset] # 读第 N 个 chunk（0-based）
+    python -m pdfmaker reader verify <file>             # 校验 5 字段，全过才算读完
+    python -m pdfmaker reader toc    <file>             # 仅打印标题树（不计 chunk）
+    python -m pdfmaker reader ingest <file>             # 一键通读：index + 逐块读完 + verify
+    python -m pdfmaker reader clean  [--global] [dir] [--apply]
+                                                  # 清除阅读状态：全局缓存（默认）或遗留点文件
 
 阅读状态文件
 ------------
-``<file>.reader-state-{hash8}.json``（与目标文件同目录）。
+统一存放于**全局缓存目录** ``READER_STATE_DIR``（默认 ``~/.cache/pdfmaker/reader``，
+可用环境变量 ``PDFMAKER_READER_STATE_DIR`` 覆盖），命名为 ``reader-state-{hash8}.json``，
+**不再散落在内容目录**，避免污染书稿项目。旧版遗留在内容目录的 ``.reader-state-*.json``
+点文件可用 ``reader clean <dir> --apply`` 清理。
 
 校验 5 字段（缺一不可，verify 才算读完）
 ---------------------------------------
@@ -24,12 +28,8 @@ grep 摘要或凭记忆下笔。本工具负责「读单个素材文件」的全
 3. 行被完整覆盖（由 1+2 推出）
 4. 文件字节数与初始记录一致（未被中途改动）
 5. 至少读过 1 个 chunk
-
-是否调用 / 何时调用
-------------------
-由「素材阅读 SOP」在写任意章节之前调用：先 index，再逐 chunk 读完，最后 verify。
-track_materials.py 负责「章节 → 多素材」的映射与跨会话持久化；本工具负责单文件。
 """
+
 import sys
 import json
 import hashlib
@@ -37,14 +37,14 @@ import re
 import argparse
 from pathlib import Path
 
-from common import setup_utf8
+from pdfmaker.core.paths import setup_utf8
 
 setup_utf8()
 
-# 容量参数：单 chunk 行数上限与单 read 字节上限
-CHUNK_SIZE_CN = 200
-CHUNK_SIZE_EN = 320
-MAX_BYTES_PER_READ = 30000
+# 容量参数：单 chunk 行数上限与单 read 字节上限（统一从 config 收口）
+# 用模块别名访问，确保运行时 toml / 环境变量覆盖能真正生效
+# （静态 `from ... import X` 会在模块加载时固化默认值，覆盖失效）。
+import pdfmaker.core.config as cfg  # noqa: E402
 
 SECTION_PATTERNS = [
     (re.compile(r"^\s*---\s*$"), "---"),
@@ -55,6 +55,7 @@ SECTION_PATTERNS = [
 
 
 def detect_kind(text_sample: str) -> str:
+    """判断素材语种：中文占比 >30% 返回 ``"cn"``，否则 ``"en"``（用于选分块策略）。"""
     if not text_sample:
         return "en"
     cn = sum(1 for c in text_sample if "\u4e00" <= c <= "\u9fff")
@@ -62,9 +63,15 @@ def detect_kind(text_sample: str) -> str:
 
 
 def state_path(file: str) -> Path:
-    p = Path(file)
-    h = hashlib.md5(str(p.absolute()).encode("utf-8")).hexdigest()[:8]
-    return p.parent / f".reader-state-{h}.json"
+    """阅读状态文件存放于全局缓存目录（READER_STATE_DIR），不再污染内容目录。
+
+    文件名取素材绝对路径的 md5 前 8 位（与旧版一致，保证同一文件状态可复现），
+    但前缀不带前导点，区别于旧版散落在内容目录的 ``.reader-state-*.json``。
+    """
+    p = Path(file).absolute()
+    h = hashlib.md5(str(p).encode("utf-8")).hexdigest()[:8]
+    cfg.READER_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    return cfg.READER_STATE_DIR / f"reader-state-{h}.json"
 
 
 def load_state(file: str) -> dict:
@@ -76,7 +83,7 @@ def load_state(file: str) -> dict:
             pass
     return {
         "chunks_read": [], "total_chunks": 0, "file": "", "total_lines": 0,
-        "size_bytes": 0, "kind": "cn", "chunk_size": CHUNK_SIZE_CN,
+        "size_bytes": 0, "kind": "cn", "chunk_size": cfg.CHUNK_SIZE_CN,
     }
 
 
@@ -92,6 +99,7 @@ def die(msg: str) -> None:
 
 
 def cmd_index(file: str) -> None:
+    """总览素材文件（标题/URL/章节数）并初始化阅读状态（index 子命令）。"""
     p = Path(file)
     if not p.exists():
         die(f"FILE NOT FOUND: {file}")
@@ -113,12 +121,12 @@ def cmd_index(file: str) -> None:
 
     sample = text[:5000]
     kind = detect_kind(sample)
-    chunk_size = CHUNK_SIZE_CN if kind == "cn" else CHUNK_SIZE_EN
+    chunk_size = cfg.CHUNK_SIZE_CN if kind == "cn" else cfg.CHUNK_SIZE_EN
 
     if kind == "cn":
         chunks_planned = (len(lines) + chunk_size - 1) // chunk_size
     else:
-        bytes_chunks = (len(data) + MAX_BYTES_PER_READ - 1) // MAX_BYTES_PER_READ
+        bytes_chunks = (len(data) + cfg.MAX_BYTES_PER_READ - 1) // cfg.MAX_BYTES_PER_READ
         line_chunks = (len(lines) + chunk_size - 1) // chunk_size
         chunks_planned = max(bytes_chunks, line_chunks)
 
@@ -148,10 +156,11 @@ def cmd_index(file: str) -> None:
     }
     save_state(file, st)
     print(f"\n[STATE WRITTEN] {state_path(file)}", file=sys.stderr)
-    print(f'[NEXT] python reader.py chunk "{file}" 0', file=sys.stderr)
+    print(f'[NEXT] python -m pdfmaker reader chunk "{file}" 0', file=sys.stderr)
 
 
 def cmd_chunk(file: str, n: int, reset: bool = False) -> None:
+    """打印并登记第 N 个 chunk（0-based）为已读（chunk 子命令）。"""
     p = Path(file)
     if not p.exists():
         die(f"FILE NOT FOUND: {file}")
@@ -160,10 +169,10 @@ def cmd_chunk(file: str, n: int, reset: bool = False) -> None:
         st["chunks_read"] = []
     total_chunks = st.get("total_chunks", 0)
     if total_chunks == 0:
-        die("state 未初始化。先跑 `reader.py index <file>`")
+        die("state 未初始化。先跑 `reader index <file>`")
     if n < 0 or n >= total_chunks:
         die(f"chunk 索引 {n} 超出范围 [0, {total_chunks})")
-    chunk_size = st.get("chunk_size", CHUNK_SIZE_CN)
+    chunk_size = st.get("chunk_size", cfg.CHUNK_SIZE_CN)
     text = p.read_text(encoding="utf-8")
     lines = text.splitlines()
     start = n * chunk_size
@@ -184,13 +193,33 @@ def cmd_chunk(file: str, n: int, reset: bool = False) -> None:
     print(f"[PROGRESS] {len(st['chunks_read'])}/{total_chunks} chunks read", file=sys.stderr)
 
 
+def cmd_ingest(file: str) -> int:
+    """一键通读：index + 逐块读完所有 chunk + verify。返回 verify 的退出码。"""
+    p = Path(file)
+    if not p.exists():
+        die(f"FILE NOT FOUND: {file}")
+
+    cmd_index(file)
+    st = load_state(file)
+    total = st.get("total_chunks", 0)
+    if total == 0:
+        die("index 未规划出 chunk，无法 ingest")
+
+    print(f"\n=== INGEST: 逐块通读 {total} 个 chunk ===", file=sys.stderr)
+    for n in range(total):
+        cmd_chunk(file, n)
+
+    return cmd_verify(file)
+
+
 def cmd_verify(file: str) -> int:
+    """校验 5 字段（chunk 连续/末块到 EOF/行覆盖/字节一致/至少读 1 块），全过返回 0。"""
     p = Path(file)
     if not p.exists():
         die(f"FILE NOT FOUND: {file}")
     st = load_state(file)
     if st.get("total_chunks", 0) == 0:
-        print("VERIFY: ❌ FAIL — state 未初始化。先跑 `reader.py index <file>`")
+        print("VERIFY: ❌ FAIL — state 未初始化。先跑 `reader index <file>`")
         return 1
 
     file_bytes = p.stat().st_size
@@ -226,11 +255,55 @@ def cmd_verify(file: str) -> int:
     print(f"❌ VERIFY: FAIL — 缺失 {len(missing)} 个 chunk")
     if missing:
         print(f"  MISSING: {missing}")
-        print(f"  NEXT: python reader.py chunk \"{file}\" {missing[0]}")
+        print(f"  NEXT: python -m pdfmaker reader chunk \"{file}\" {missing[0]}")
     return 1
 
 
+def cmd_clean(target: str | None, global_cache: bool, apply: bool) -> int:
+    """清除 reader 阅读状态文件。
+
+    - 默认 / ``--global`` / 未给 target：清理**全局缓存目录** ``READER_STATE_DIR``
+      （新版本状态存放处），匹配 ``reader-state-*.json``（无前导点）。
+    - 传入 ``<dir>``：扫描该目录（含子目录）里的遗留 ``.reader-state-*.json`` 点文件
+      （旧版本散落在内容目录里的状态），用于清理老项目。
+
+    默认仅试运行（列出待删文件不删除），加 ``--apply`` 才真正删除。
+    """
+    if global_cache or not target or target == ".":
+        base = cfg.READER_STATE_DIR
+        pattern = "reader-state-*.json"
+        label = f"全局缓存目录 {base}"
+        found = sorted(base.glob(pattern)) if base.exists() else []
+    else:
+        base = Path(target)
+        if not base.exists():
+            die(f"PATH NOT FOUND: {target}")
+        pattern = ".reader-state-*.json"
+        label = f"目录 {base}（遗留点文件）"
+        found = sorted(base.rglob(pattern))
+
+    if not found:
+        print(f"[reader clean] 未发现匹配文件（{label}）")
+        return 0
+
+    total_bytes = 0
+    for sp in found:
+        sz = sp.stat().st_size
+        total_bytes += sz
+        if apply:
+            sp.unlink()
+            print(f"  [DELETE] {sp} ({sz} bytes)")
+        else:
+            print(f"  [DRY-RUN] {sp} ({sz} bytes)")
+    verb = "已删除" if apply else "（试运行，未删除）"
+    print(f"[reader clean] {verb} {len(found)} 个文件，约 {total_bytes} bytes。")
+    if not apply:
+        print("  加 --apply 真正删除。")
+    return 0
+
+
 def cmd_toc(file: str) -> None:
+    """打印素材 Markdown 标题树（含层级与行号，不计入 chunk）。"""
     p = Path(file)
     if not p.exists():
         die(f"FILE NOT FOUND: {file}")
@@ -251,19 +324,18 @@ def cmd_toc(file: str) -> None:
                 break
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="reader.py",
+        prog="pdfmaker reader",
         description="素材强制阅读三阶段校验工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "示例（本项目）:\n"
-            "  python reader.py index  \"<素材 report.md 路径>\"\n"
-            "  python reader.py chunk  \"<素材 report.md 路径>\" 0\n"
-            "  python reader.py chunk  \"<素材 report.md 路径>\" 1   # 逐块读完所有 chunk\n"
-            "  python reader.py verify \"<素材 report.md 路径>\"     # 5 字段全过才算读完\n\n"
-            "说明: <file> 必须是真实素材报告路径（如 .../deep-search/xxx/report.md）。\n"
-            "      verify 前必须先 index + 逐 chunk 读完，缺一步 verify 会直接 FAIL。"
+            "示例:\n"
+            "  python -m pdfmaker reader ingest \"<素材 .md 路径>\"     # 一键：index + 逐块通读 + verify\n"
+            "  python -m pdfmaker reader index  \"<素材 .md 路径>\"\n"
+            "  python -m pdfmaker reader chunk  \"<素材 .md 路径>\" 0\n"
+            "  python -m pdfmaker reader verify \"<素材 .md 路径>\"\n\n"
+            "说明: <file> 必须是你项目里任意真实的素材 .md 文件路径。"
         ),
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -275,19 +347,36 @@ def main() -> None:
     p_chunk.add_argument("--reset", action="store_true")
     p_verify = sub.add_parser("verify", help="校验 5 字段")
     p_verify.add_argument("file")
+    p_ingest = sub.add_parser("ingest", help="一键通读：index + 逐块读完 + verify")
+    p_ingest.add_argument("file")
     p_toc = sub.add_parser("toc", help="仅打印标题树")
     p_toc.add_argument("file")
+    p_clean = sub.add_parser("clean", help="清除阅读状态（全局缓存 / 遗留点文件）")
+    p_clean.add_argument("target", nargs="?", default=None,
+                         help="扫描目录（清理遗留 .reader-state-*.json 点文件）；省略则用全局缓存")
+    p_clean.add_argument("--global", dest="global_cache", action="store_true",
+                         help="清理全局 reader 状态缓存目录（未给 target 时的默认行为）")
+    p_clean.add_argument("--apply", action="store_true",
+                         help="真正删除（默认仅试运行，列出待删文件）")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.cmd == "index":
         cmd_index(args.file)
+        return 0
     elif args.cmd == "chunk":
         cmd_chunk(args.file, args.n, args.reset)
+        return 0
     elif args.cmd == "verify":
-        sys.exit(cmd_verify(args.file))
+        return cmd_verify(args.file)
+    elif args.cmd == "ingest":
+        return cmd_ingest(args.file)
     elif args.cmd == "toc":
         cmd_toc(args.file)
+        return 0
+    elif args.cmd == "clean":
+        return cmd_clean(args.target, args.global_cache, args.apply)
+    return 2
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

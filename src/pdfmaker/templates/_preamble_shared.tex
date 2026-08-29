@@ -1,0 +1,44 @@
+% _preamble_shared.tex —— 单章(_tmp.tex) 与整书(main.tex) 模板共用的「补丁片段」唯一真源。
+%
+% 这是消除「双源漂移」的关键：过去中文 URL 支持、参考文献降级、codeblock 环境、
+% 防溢出这 4 段补丁在 _tmp.tex 与 main.tex 里各写一份，任何人改一处都极易漏另一处。
+% 现在它们只在此文件定义一份；fix / scaffold 在生成 _tmp.tex / main.tex 时把
+% 模板里的共用补丁占位符替换为本文件内容（内联，保证编译产物自包含、无 \input 路径问题）。
+%
+% 改这些补丁，只改这里，重新 fix / scaffold 即可，两套模板自动同步。
+% 注意：本片段只包含「补丁命令」，不含 \usepackage（包清单仍由各模板各自声明并保持同步）。
+
+% === 中文 URL 支持 ===
+% url.sty 默认在 math mode 渲染 URL，xeCJK 不接管 math mode，中文会变成豆腐块。
+% 重写 \Url@FormatString 去掉 math mode，中文走正常字体分类即可正确显示。
+\makeatletter
+\def\Url@FormatString{%
+ \UrlFont
+ \expandafter\UrlLeft\Url@String\UrlRight
+}
+\makeatother
+
+% === 参考文献降级 + 不跳页 + 不改页眉 ===
+% book/ctexrep 的 thebibliography 默认 \chapter*（最大级标题 + 跳页 + 改页眉）。
+% 重定义为 \section* 并去掉 \@mkboth，与正文页眉保持一致。
+\makeatletter
+\patchcmd{\thebibliography}{\chapter*{\bibname}}{\section*{\bibname}}{}{}
+\patchcmd{\thebibliography}{\@mkboth{\MakeUppercase\bibname}{\MakeUppercase\bibname}}{}{}{}
+\makeatother
+
+% === 代码块环境：浅灰打底 + 自动换行（禁用裸 \verbatim） ===
+% tcolorbox + listings 引擎（\newtcblisting），breaklines 自动折行长代码行，
+% 与正文明显区分。禁用裸 \verbatim（不折行会溢出页面）。
+\newtcblisting{codeblock}{
+  colback=gray!10!white, colframe=gray!45!white, boxrule=0.4pt,
+  arc=3pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
+  listing only, breakable,
+  listing options={
+    breaklines=true, breakatwhitespace=false,
+    basicstyle=\small\ttfamily, showstringspaces=false,
+    frame=none, numbers=none, aboveskip=0pt, belowskip=0pt
+  }
+}
+
+% === 防溢出 ===
+\setlength{\emergencystretch}{3.5em}

@@ -4,9 +4,12 @@
 % 参考文献样式、代码块、图片宽度上限等。章节源文件无需关心这些全局设置。
 %
 % 使用步骤：
-%   1. 替换所有 {{XXX}} 占位符（TITLE / SUBTITLE / EPIGRAPH / EPIGRAPH_CLOSING / AUTHOR / DATE / PROJECT / PDF_TITLE）。
+%   1. 替换所有 {{XXX}} 占位符（TITLE / SUBTITLE / EPIGRAPH / EPIGRAPH_CLOSING / AUTHOR / DATE / PDF_TITLE）。
 %      - {{TITLE}} 用于扉页显示，可含 \\ 换行；{{PDF_TITLE}} 用于 PDF 元数据，必须单行、不含 \\。
 %      - {{EPIGRAPH_CLOSING}} 用于结尾段引文（可选，留空则整段删除）。
+%      - 注：共用补丁占位符（SHARED_PREAMBLE）不是给用户填的——scaffold 会自动替换为
+%        共用补丁片段（中文 URL 支持 / 参考文献降级 / codeblock 环境 / 防溢出），无需手动改动，
+%        其唯一真源是 templates/_preamble_shared.tex。
 %   2. 在下方“正文各章”处的章节列表占位符中，每章写一行 \input{第N章/第N章}。
 %   3. 若不需要扉页 / 序言 / 附录 / 结尾段，删除对应整块。
 %   4. xelatex 跑两遍（第二遍解析交叉引用）。
@@ -32,27 +35,16 @@
 \usepackage{enumitem}
 \usepackage{url}
 
-% === 中文 URL 支持 ===
-% url.sty 默认在 math mode 渲染 URL，xeCJK 不接管 math mode，中文会变成豆腐块。
-% 重写 \Url@FormatString 去掉 math mode，中文走正常字体分类即可正确显示。
-\makeatletter
-\def\Url@FormatString{%
- \UrlFont
- \expandafter\UrlLeft\Url@String\UrlRight
-}
-\makeatother
-
 \usepackage{etoolbox}
 \usepackage{geometry}
 \usepackage{fancyhdr}
 
-% === 参考文献降级 + 不跳页 + 不改页眉 ===
-% book/ctexrep 的 thebibliography 默认 \chapter*（最大级标题 + 跳页 + 改页眉）。
-% 重定义为 \section* 并去掉 \@mkboth，与正文页眉保持一致。
-\makeatletter
-\patchcmd{\thebibliography}{\chapter*{\bibname}}{\section*{\bibname}}{}{}
-\patchcmd{\thebibliography}{\@mkboth{\MakeUppercase\bibname}{\MakeUppercase\bibname}}{}{}{}
-\makeatother
+% === 共用补丁片段（唯一真源：templates/_preamble_shared.tex） ===
+% scaffold 会把 {{SHARED_PREAMBLE}} 替换为本片段内容（中文 URL 支持 / 参考文献降级 /
+% codeblock 环境 / 防溢出），避免与 _tmp.tex 双份手维护导致漂移。
+% 放在 fancyhdr 之后：此时 etoolbox（\patchcmd）、tcolorbox（\newtcblisting）均已加载，
+% 4 段补丁的顺序依赖全部满足。
+{{SHARED_PREAMBLE}}
 
 \geometry{margin=2.5cm}
 
@@ -86,24 +78,6 @@
   pdfsubject={{SUBTITLE}}
 }
 
-% === 代码块环境：浅灰打底 + 自动换行 ===
-% tcolorbox + listings 引擎（\newtcblisting），breaklines 自动折行长代码行，
-% 与正文明显区分。禁用裸 \verbatim（不折行会溢出页面）。
-\newtcblisting{codeblock}{
-  colback=gray!10!white, colframe=gray!45!white, boxrule=0.4pt,
-  arc=3pt, left=6pt, right=6pt, top=5pt, bottom=5pt,
-  listing only, breakable,
-  listing options={
-    breaklines=true, breakatwhitespace=false,
-    basicstyle=\small\ttfamily, showstringspaces=false,
-    frame=none, numbers=none, aboveskip=0pt, belowskip=0pt
-  }
-}
-
-% === 防溢出：吸收段落级微小超宽 ===
-% 不能解决 TikZ 节点不可断词 / 显示公式超宽——那些须改源码。
-\setlength{\emergencystretch}{3.5em}
-
 \begin{document}
 
 % ============ 扉页 ============
@@ -130,6 +104,12 @@
 \addcontentsline{toc}{chapter}{序言}
 
 % 在此输入序言正文（建议 200-400 字，介绍写作缘起 / 资料来源 / 读者对象 / 阅读建议）
+
+% ⚠️ 若在前置部分（序言/术语表/摘要）插入整宽表格（tabularx/tabular/table），
+% 务必在其前一行加 \noindent：否则段落缩进（\parindent，11pt 下 2em≈21.9pt）
+% 会与整宽表格叠加，触发恰好 21.9pt 的 Overfull（build 合并前会专门预检此项）。
+% 示例：
+%   \noindent\begin{tabularx}{\textwidth}{l X} ... \end{tabularx}
 
 \newpage
 
