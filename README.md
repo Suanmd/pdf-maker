@@ -17,6 +17,16 @@
 
 适用：中文技术报告、调研报告、白皮书、论文（每章 5–15 页，≤ 30 章规模）。
 
+## 效果展示
+
+下图为一章由 `pdfmaker` 自动生成骨架编译出的实际样张（含三线表、TikZ 图、codeblock 伪代码与参考文献）：
+
+![pdf-maker 样张1](examples/example_preview_1.png)
+
+![pdf-maker 样张2](examples/example_preview_2.png)
+
+- 完整 7 页示例 PDF：[`examples/example.pdf`](examples/example.pdf)
+
 ## 环境要求
 
 | 依赖 | 版本 / 说明 |
@@ -153,19 +163,24 @@ pdf-maker/
 ├── CONTRIBUTING.md                # 贡献指南
 ├── pyproject.toml                 # 打包（setuptools，零第三方依赖）
 ├── .gitignore
+├── examples/                      # 样张
 └── src/
     └── pdfmaker/                  # 标准 Python 包（可 pip install -e .）
         ├── __init__.py            #   版本号
         ├── __main__.py            #   python -m pdfmaker 入口
         ├── cli.py                 #   子命令分发
         ├── py.typed               #   类型标记
-        ├── core/                  #   共享纯函数（路径/文本/规范化/章节/lint）
+        ├── core/                  #   共享纯函数（路径/文本/规范化/章节/lint/配置/引擎探测）
+        │   ├── __init__.py
         │   ├── paths.py           #     路径定位 / UTF-8 / 模板定位
         │   ├── text.py            #     字数统计（剔除表格/图/code）
-        │   ├── normalize.py       #     单一规范化真源（URL→href + TikZ 上限）
+        │   ├── normalize.py       #     单一规范化真源（URL → href + TikZ 上限 + 字形修复）
         │   ├── chapters.py        #     章节枚举
+        │   ├── config.py          #     配置项默认值（PDFMAKER_* 环境变量映射）
+        │   ├── xelatex.py         #     find_xelatex：编译引擎探测（PATH / env / toml / 候选路径）
         │   └── lint.py            #     编译前风险预检（缺字/截断URL/TikZ/Frontmatter/三线表/伪代码样式）
         ├── commands/              #   每个子命令一个模块，暴露 main(argv)->int
+        │   ├── __init__.py
         │   ├── fix.py             #     单章预处理
         │   ├── check.py           #     结构统计 + 风险预检 + 排版样式门禁（三线表/伪代码，阻断级）
         │   ├── balance.py         #     结构/引用均衡（阻断/建议分明）
@@ -179,7 +194,12 @@ pdf-maker/
         │   ├── reader.py          #     素材阅读校验
         │   ├── track.py           #     章节↔素材阅读状态追踪
         │   └── scaffold.py        #     初始化书稿骨架
-        └── templates/             #   包内 LaTeX 模板 + 章节阅读笔记模板（main.tex / _tmp.tex / chapter_init_notes_template.md）
+        └── templates/             #   包内 LaTeX 模板 + 章节阅读笔记模板
+            ├── __init__.py
+            ├── _preamble_shared.tex        #   共享 preamble 片段（4 段，单一真源）
+            ├── _tmp.tex                    #   单章编译 preamble 唯一真源
+            ├── main.tex                    #   整书主控
+            └── chapter_init_notes_template.md  # 章节阅读笔记模板
 ```
 
 ## 命令参考
@@ -197,7 +217,7 @@ pdf-maker/
 | `xref` | `xref [target]`（`.` 或 `N` 或 `.tex`） | 合并前预检：越界「第N章」引用 / 跨章 `\ref` |
 | `verify` | `verify <target>`（`N` / `.tex` / `.` 整书）`[--retries N] [--timeout S] [--cache P] [--refresh]` | 联网验活（exit 0/1/2；401/403/429 算 LIVE；结果可缓存） |
 | `build` | `build [root]`（默认 `.`）`[--verify] [--no-preflight]` | **整书合并唯一入口** |
-| `chapter` | `chapter <N> [--material F] [--project P] [--xelatex X] [--no-verify] [--no-track]` | **单章九步 SOP 一键编排**：reader→fix→check→balance→verify→xelatex×2→overflow→cleanup→track，任一步阻断即中止 |
+| `chapter` | `chapter <N> [--material F] [--project P] [--xelatex X] [--no-verify] [--no-track]` | **单章九步 SOP 一键编排**：reader → fix → check → balance → verify → xelatex×2 → overflow → cleanup → track，任一步阻断即中止 |
 | `overflow` | `overflow [log]` | 日志体检，省略则自动找 `_tmp.log`/`main.log` |
 | `cleanup` | `cleanup [chapter]` | 落盘 + 归档中间文件 |
 | `labels` | `labels [root]`（默认 CWD） | 跨章 `\label` 去重 |
@@ -297,7 +317,7 @@ verify_cache_dir = "~/.cache/pdfmaker"
 
 ```bash
 cd <PROJECT>
-python -m pdfmaker chapter 3                 # 第 3 章全链路：reader→fix→check→balance→verify→xelatex×2→overflow→cleanup→track
+python -m pdfmaker chapter 3                 # 第 3 章全链路：reader → fix → check → balance → verify → xelatex×2 → overflow → cleanup → track
 python -m pdfmaker chapter 3 --material 素材.md   # 顺带先 ingest 指定素材
 python -m pdfmaker chapter 3 --no-verify     # 离线时跳过联网验活
 python -m pdfmaker chapter 3 --no-track      # 跳过素材追踪更新

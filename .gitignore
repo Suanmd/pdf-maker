@@ -33,6 +33,12 @@ _build_bak*/
 main.pdf
 第*章/*.pdf
 
+# examples/ 下的示例
+!examples/
+!examples/**
+!examples/*.pdf
+!examples/*.png
+
 # 编辑器 / 系统
 .DS_Store
 Thumbs.db
