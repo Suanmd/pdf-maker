@@ -12,17 +12,17 @@ grep 摘要或凭记忆下笔。本工具负责「读单个素材文件」的全
     python -m pdfmaker reader toc    <file>             # 仅打印标题树（不计 chunk）
     python -m pdfmaker reader ingest <file>             # 一键通读：index + 逐块读完 + verify
     python -m pdfmaker reader clean  [--global] [dir] [--apply]
-                                                  # 清除阅读状态：全局缓存（默认）或遗留点文件
+                                                        # 清除阅读状态：全局缓存（默认）或遗留点文件
 
 阅读状态文件
 ------------
-统一存放于**全局缓存目录** ``READER_STATE_DIR``（默认 ``~/.cache/pdfmaker/reader``，
-可用环境变量 ``PDFMAKER_READER_STATE_DIR`` 覆盖），命名为 ``reader-state-{hash8}.json``，
-**不再散落在内容目录**，避免污染书稿项目。旧版遗留在内容目录的 ``.reader-state-*.json``
-点文件可用 ``reader clean <dir> --apply`` 清理。
+统一存放于**全局缓存目录** ``READER_STATE_DIR``（macOS 默认 ``~/Library/Caches/pdfmaker/reader``，
+其他平台默认 ``~/.cache/pdfmaker/reader``，可用环境变量 ``PDFMAKER_READER_STATE_DIR`` 覆盖），
+命名为 ``reader-state-{hash8}.json``，**不再散落在内容目录**，避免污染书稿项目。
+旧版遗留在内容目录的 ``.reader-state-*.json`` 点文件可用 ``reader clean <dir> --apply`` 清理。
 
 校验 5 字段（缺一不可，verify 才算读完）
----------------------------------------
+--------------------------------------
 1. chunks_read 连续无缺口（覆盖所有规划 chunk）
 2. 最后一个 chunk 到达 EOF
 3. 行被完整覆盖（由 1+2 推出）
@@ -30,21 +30,19 @@ grep 摘要或凭记忆下笔。本工具负责「读单个素材文件」的全
 5. 至少读过 1 个 chunk
 """
 
-import sys
-import json
-import hashlib
-import re
 import argparse
+import hashlib
+import json
+import re
+import sys
 from pathlib import Path
 
+# 容量参数（单 chunk 行数上限 / 单 read 字节上限）统一从 config 收口；
+# 用模块别名访问（而非 from ... import X），确保运行时 toml / 环境变量覆盖真正生效。
+import pdfmaker.core.config as cfg
 from pdfmaker.core.paths import setup_utf8
 
 setup_utf8()
-
-# 容量参数：单 chunk 行数上限与单 read 字节上限（统一从 config 收口）
-# 用模块别名访问，确保运行时 toml / 环境变量覆盖能真正生效
-# （静态 `from ... import X` 会在模块加载时固化默认值，覆盖失效）。
-import pdfmaker.core.config as cfg  # noqa: E402
 
 SECTION_PATTERNS = [
     (re.compile(r"^\s*---\s*$"), "---"),
@@ -58,7 +56,7 @@ def detect_kind(text_sample: str) -> str:
     """判断素材语种：中文占比 >30% 返回 ``"cn"``，否则 ``"en"``（用于选分块策略）。"""
     if not text_sample:
         return "en"
-    cn = sum(1 for c in text_sample if "\u4e00" <= c <= "\u9fff")
+    cn = sum(1 for c in text_sample if "一" <= c <= "鿿")
     return "cn" if cn / len(text_sample) > 0.3 else "en"
 
 
@@ -75,6 +73,7 @@ def state_path(file: str) -> Path:
 
 
 def load_state(file: str) -> dict:
+    """读取素材的阅读状态；缺失或损坏时返回一份空白初始状态。"""
     sp = state_path(file)
     if sp.exists():
         try:
@@ -88,12 +87,14 @@ def load_state(file: str) -> dict:
 
 
 def save_state(file: str, st: dict) -> None:
+    """把素材的阅读状态写回全局缓存目录。"""
     state_path(file).write_text(
         json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
 
 def die(msg: str) -> None:
+    """打印错误并以 exit 1 终止（参数/文件类硬错误的统一出口）。"""
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
 
@@ -193,11 +194,27 @@ def cmd_chunk(file: str, n: int, reset: bool = False) -> None:
     print(f"[PROGRESS] {len(st['chunks_read'])}/{total_chunks} chunks read", file=sys.stderr)
 
 
-def cmd_ingest(file: str) -> int:
-    """一键通读：index + 逐块读完所有 chunk + verify。返回 verify 的退出码。"""
+def cmd_ingest(file: str, force: bool = False) -> int:
+    """一键通读：index + 逐块读完所有 chunk + verify。返回 verify 的退出码。
+
+    缓存短路：若既有阅读状态显示「该文件已完整读完且字节数未变」（状态按绝对
+    路径 md5 键控、index 时记录 size_bytes），则跳过逐块重读直接 verify——
+    章节编排器（chapter）与手工 SOP 会对同一素材重复 ingest，未变更时重读全文
+    是纯噪音。``--force`` 强制重读。
+    """
     p = Path(file)
     if not p.exists():
         die(f"FILE NOT FOUND: {file}")
+
+    if not force:
+        st = load_state(file)
+        total = st.get("total_chunks", 0)
+        if (total > 0
+                and sorted(st.get("chunks_read", [])) == list(range(total))
+                and st.get("size_bytes") == p.stat().st_size):
+            print(f"[ingest] 素材自上次完整阅读后未变更（{p.stat().st_size} bytes / "
+                  f"{total} chunks 已读），跳过逐块重读；`--force` 可强制重读。")
+            return cmd_verify(file)
 
     cmd_index(file)
     st = load_state(file)
@@ -347,8 +364,10 @@ def main(argv: list[str] | None = None) -> int:
     p_chunk.add_argument("--reset", action="store_true")
     p_verify = sub.add_parser("verify", help="校验 5 字段")
     p_verify.add_argument("file")
-    p_ingest = sub.add_parser("ingest", help="一键通读：index + 逐块读完 + verify")
+    p_ingest = sub.add_parser("ingest", help="一键通读：index + 逐块读完 + verify（已读未变则缓存短路）")
     p_ingest.add_argument("file")
+    p_ingest.add_argument("--force", action="store_true",
+                          help="强制逐块重读（默认：素材自上次完整阅读后未变更则跳过重读）")
     p_toc = sub.add_parser("toc", help="仅打印标题树")
     p_toc.add_argument("file")
     p_clean = sub.add_parser("clean", help="清除阅读状态（全局缓存 / 遗留点文件）")
@@ -369,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "verify":
         return cmd_verify(args.file)
     elif args.cmd == "ingest":
-        return cmd_ingest(args.file)
+        return cmd_ingest(args.file, force=args.force)
     elif args.cmd == "toc":
         cmd_toc(args.file)
         return 0

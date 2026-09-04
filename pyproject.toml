@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pdf-maker"
-version = "2.0.0"
+version = "2.3.0"
 description = "中文 LaTeX 报告工程化工具：单章编译 + 整书合并，关键节点质量关卡把关"
 readme = "README.md"
 license = { text = "MIT" }

@@ -8,12 +8,15 @@
 ------------------
 1. 先把 _tmp.pdf 复制为 <stem>.pdf（必须在删 _tmp.* 之前，否则会误删成品 PDF）。
 2. 归档中间文件：chN.tex / 附录X_ch.tex、_tmp.*（fix 等常驻脚本保留，不删）。
+3. 修剪 _tmp_old/ 归档：每个基线名保留最近 cfg.TMP_OLD_KEEP 份，删除更旧者。
 
 保留项
 ------
 <stem>.tex、<stem>.pdf、以及本工具的常驻脚本。
 
-退出码：始终为 0。
+退出码
+------
+始终为 0。
 """
 
 import argparse
@@ -48,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     work = workdir_for(args.chapter)
     stem = stem_of(args.chapter)
 
-    # 1. 先复制成品 PDF（顺序敏感：必须在清 _tmp.* 之前）
+    # ---- 1. 先复制成品 PDF（顺序敏感：必须在清 _tmp.* 之前） ----
     tmp_pdf = work / "_tmp.pdf"
     target_pdf = work / f"{stem}.pdf"
     if tmp_pdf.exists():
@@ -57,9 +60,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(f"[cleanup] 警告：未找到 {tmp_pdf}，跳过复制")
 
-    # 2. 归档中间文件到 _tmp_old/（用「移动/重命名」而非 unlink 删除）
-    #    部分运行环境会拦截 unlink，改用同目录 rename（移动）可绕过，
-    #    且天然保留中间产物便于事后追溯。碰撞时追加序号避免覆盖。
+    # ---- 2. 归档中间文件到 _tmp_old/（用「移动/重命名」而非 unlink 删除） ----
+    # 部分运行环境会拦截 unlink，改用同目录 rename（移动）可绕过，
+    # 且天然保留中间产物便于事后追溯。碰撞时追加序号避免覆盖。
     archive_dir = work / "_tmp_old"
     archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -81,16 +84,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[cleanup] Skip: {name} ({e})")
 
     kill_files = [mid_name_for(args.chapter)]
+    # _tmp.listing 是 tcolorbox listings 引擎（codeblock 环境）写出的中间文件，
+    # 章节含 codeblock 时每次编译都会生成，不归档会残留在章目录。
     intermediate_globs = [
         "_tmp.aux", "_tmp.log", "_tmp.out", "_tmp.toc",
-        "_tmp.synctex.gz", "_tmp.tex", "_tmp.pdf",
+        "_tmp.synctex.gz", "_tmp.tex", "_tmp.pdf", "_tmp.listing",
     ]
     for name in kill_files:
         _archive(name)
     for pat in intermediate_globs:
         for f in sorted(work.glob(pat)):
             _archive(f.name)
-    # ---- 归档份数上限：长期累积成磁盘垃圾，保留每基线最近 N 份 ----
+
+    # ---- 3. 归档份数上限：长期累积成磁盘垃圾，保留每基线最近 N 份 ----
     removed = _prune_archive(archive_dir, cfg.TMP_OLD_KEEP)
     if removed:
         print(f"[cleanup] Pruned {len(removed)} 旧归档（保留每基线最近 {cfg.TMP_OLD_KEEP} 份）")
@@ -98,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _prune_archive(archive_dir: Path, max_keep: int) -> list[str]:
-    """保留每个归档基线名最近 ``max_keep`` 份，删除更旧的（按索引升序，无索引=最新）。
+    """保留每个归档基线名最近 ``max_keep`` 份，删除更旧的（按索引升序，无索引=最旧）。
 
     cleanup 把中间产物移入 ``_tmp_old/``，多次运行会累积 ``_tmp.tex`` / ``_tmp.1.tex`` /
     ``_tmp.2.tex`` …（碰撞时追加序号）。按「基线名 + 扩展名」分组，每组保留索引最大

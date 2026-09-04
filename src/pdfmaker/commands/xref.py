@@ -14,7 +14,10 @@ pdf-maker 的「红线」规定：跨章 \\ref 不可用（编译后会指向错
    章节，属「跨章引用」——按 pdf-maker 红线判定为阻断，应改为纯文本「第~N~章」。
 3. 悬空 \\ref（引用的 \\label 全书都未定义）：warning 级（编译期 overflow 也会抓）。
 
-退出码：0 全部通过（仅 warning 不计阻断）；1 存在阻断级问题（越界文字引用 / 跨章 \\ref）。
+退出码
+------
+0 全部通过（仅 warning 不计阻断）；1 存在阻断级问题（越界文字引用 / 跨章 \\ref）；
+2 目标解析失败或未找到章节。
 """
 
 import argparse
@@ -22,6 +25,7 @@ import re
 import sys
 from pathlib import Path
 
+import pdfmaker.core.config as cfg
 from pdfmaker.core import (
     chapter_range,
     collect_chapters,
@@ -29,6 +33,7 @@ from pdfmaker.core import (
     setup_utf8,
     strip_blocks,
 )
+from pdfmaker.core.watchdog import ScanTimeoutError, scan_watchdog
 
 setup_utf8()
 
@@ -39,6 +44,7 @@ TEXTREF_RE = re.compile(r"第[~\s]*(\d+)[~\s]*章")
 
 
 def _ch_num_of(path: Path) -> int | None:
+    """从路径解析数字章号；非数字章（附录等）返回 None。"""
     m = re.search(r"第(\d+)章", str(path))
     return int(m.group(1)) if m else None
 
@@ -65,6 +71,22 @@ def main(argv: list[str] | None = None) -> int:
                              "缺省则用已存在目录推导的范围。")
     args = parser.parse_args(argv)
 
+    # 扫描看门狗：正则扫描若指数回溯会永久空转，超时按阻断处理（exit 1）
+    try:
+        with scan_watchdog(cfg.SCAN_TIMEOUT, "xref"):
+            return _run(args)
+    except ScanTimeoutError:
+        print(
+            f"[xref] 扫描超过 {cfg.SCAN_TIMEOUT:g}s 时限（疑似正则回溯或病态输入），"
+            f"exit 1 阻断。请检查章节源码中的未闭合定界符，"
+            f"或经 PDFMAKER_SCAN_TIMEOUT / .pdfmaker.toml 的 scan_timeout 放宽时限。",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _run(args) -> int:
+    """xref 的引用校验主体（在 main 的看门狗时限内运行）。"""
     p = Path(args.target)
     if args.target in (".", "..") or p.is_dir():
         root = p.resolve() if p.is_dir() else Path.cwd().resolve()
@@ -73,7 +95,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             single = resolve_source(args.target, "pdfmaker xref")
-            root = single.parent if single.parent.name.startswith("第") else single.parent.parent
+            # 章节文件位于 第N章/（或 附录X/）子目录时，书稿根是再上一级；
+            # 旧扁平布局（第N章.tex 直接在项目根）时书稿根即父目录。
+            # 注意方向不能反：root 必须是「含全部章节的目录」，否则
+            # collect_chapters 只会扫到目标章自身，全书 label 地图残缺，
+            # --self-only 与跨章引用判定都会失效。
+            if single.parent.name.startswith(("第", "附录")):
+                root = single.parent.parent
+            else:
+                root = single.parent
             files = collect_chapters(root)
             if not files:
                 files = [single]
@@ -92,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     scope_note = f"（--expected {args.expected}）" if args.expected is not None else ""
     print(f"[xref] 章节范围: {lo}–{hi}{scope_note}；扫描 {len(files)} 个章节文件")
 
-    # 构建全局 label → 所属章号 地图
+    # ---- 构建全局 label → 所属章号 地图 ----
     label_owner: dict[str, int] = {}
     file_labels: dict[Path, set[str]] = {}
     for f in files:
@@ -117,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         pure = strip_blocks(txt)  # 去掉表格/图/verbatim/verb，避免逐字块误判
         name = f.name
 
-        # 1. 文字引用「第X章」章号范围
+        # ---- 1. 文字引用「第X章」章号范围 ----
         # 若全书无数字章（如纯附录/未分章草稿），chapter_range 返回 (0,0)，
         # 此时无法判定合法范围，跳过越界检查，避免误伤全部「第N章」文字引用。
         if has_numeric:
@@ -128,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
                         f"{name}: 文字引用「第{x}章」越界（合法范围 {lo}–{hi}）"
                     )
 
-        # 2/3. \\ref 类：跨章 / 悬空
+        # ---- 2/3. \ref 类：跨章 / 悬空 ----
         for rm in REF_RE.finditer(txt):
             key = rm.group(1)
             owner = label_owner.get(key)

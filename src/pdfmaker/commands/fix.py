@@ -1,29 +1,32 @@
 # -*- coding: utf-8 -*-
 """fix —— 单章 TeX 预处理（章节源 → 可编译成品）。
 
-把作者手写的章节源文件（标准 第N章/第N章.tex，兼容旧扁平 第N章.tex；
-附录 附录X/附录X.tex）转换为可直接交给 xelatex 编译的成品，并读取
-包内模板 _tmp.tex 生成单章独立编译所需的 _tmp.tex（preamble 唯一真源）。
+把作者手写的章节源文件（标准布局 第N章/第N章.tex，兼容旧扁平 第N章.tex；
+附录 附录X/附录X.tex）转换为可直接交给 xelatex 编译的成品，并读取包内模板
+_tmp.tex 生成单章独立编译入口。
 
 处理项
 ------
-1. URL 规范化 + 2. 图片宽度上限：统一调用 pdfmaker.core.normalize_text()
-   （= url_to_href + wrap_tikz）。其中 wrap_tikz 给每个 tikzpicture 套
-   adjustbox{max width=\textwidth}，只缩放超宽图，正常图保持原样（幂等）。
+1. 规范化：统一调用 ``pdfmaker.core.normalize_text()``（= url_to_href + wrap_tikz
+   + fix_glyphs + relax_long_texttt）。其中 wrap_tikz 给每个 tikzpicture 套
+   adjustbox{max width=\\textwidth}，只缩放超宽图，正常图保持原样（幂等）。
    该规范化逻辑与整书合并路径 build 共用，是「单一规范化真源」，
-   确保单章与合并两条流水线对 TikZ 的处理完全一致。
-3. 写出英文名中间文件 chN.tex（避免中文文件名在部分工具链下乱码）。
-4. 生成 _tmp.tex：读取包内模板 _tmp.tex（preamble 唯一真源），
-   将其中的 {{SHARED_PREAMBLE}} 替换为共用补丁片段（_preamble_shared.tex），
-   再将 \\input{CHAPTER_TEX} 占位行替换为实际章节中间文件名后写出。
+   确保单章与合并两条流水线完全一致。
+2. 写出英文名中间文件 chN.tex（避免中文文件名在部分工具链下乱码）。
+3. 生成 _tmp.tex：读取包内模板 _tmp.tex（preamble 唯一真源），将其中的
+   {{SHARED_PREAMBLE}} 替换为共用补丁片段（_preamble_shared.tex），再将
+   \\input{CHAPTER_TEX} 占位行替换为实际章节中间文件名后写出。
 
-退出码：0 成功；源文件缺失、模板缺失或模板损坏时非零退出。
+退出码
+------
+0 成功；源文件缺失、模板缺失或模板损坏时非零退出。
 """
 
 import argparse
 import sys
 from pathlib import Path
 
+import pdfmaker.core.config as cfg
 from pdfmaker.core.normalize import normalize_text
 from pdfmaker.core.paths import (
     find_tmp_template,
@@ -32,6 +35,7 @@ from pdfmaker.core.paths import (
     resolve_source,
     setup_utf8,
 )
+from pdfmaker.core.watchdog import ScanTimeoutError, scan_watchdog
 
 setup_utf8()
 
@@ -68,10 +72,26 @@ def main(argv: list[str] | None = None) -> int:
                         help="章节号（数字 N 或 附录X），默认第 1 章")
     args = parser.parse_args(argv)
 
+    # 扫描看门狗：normalize_text 的正则若指数回溯会永久空转，超时按阻断处理（exit 1）
+    try:
+        with scan_watchdog(cfg.SCAN_TIMEOUT, "fix"):
+            return _run(args)
+    except ScanTimeoutError:
+        print(
+            f"[fix] 规范化超过 {cfg.SCAN_TIMEOUT:g}s 时限（疑似正则回溯或病态输入），"
+            f"exit 1 阻断。请检查章节源码中的未闭合定界符，"
+            f"或经 PDFMAKER_SCAN_TIMEOUT / .pdfmaker.toml 的 scan_timeout 放宽时限。",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _run(args) -> int:
+    """fix 的规范化与模板生成主体（在 main 的看门狗时限内运行）。"""
     _cwd_hint()
 
     src = resolve_source(args.chapter, "pdfmaker fix")
-    # 单一规范化真源：URL→href + TikZ 图宽上限（与 build 合并路径完全一致）
+    # 单一规范化真源：URL → href + TikZ 图宽上限 + 字形修复（与 build 合并路径完全一致）
     text = normalize_text(src.read_text(encoding="utf-8"))
 
     mid_name = mid_name_for(args.chapter)
@@ -84,8 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             "[fix] 找不到 _tmp.tex 模板；请保持包安装完整（模板位于 pdfmaker.templates）。"
         )
     tpl_text = Path(tpl).read_text(encoding="utf-8")
-    # 解析共用补丁片段占位符（消除 _tmp.tex / main.tex 双源漂移）；
-    # 缺失则原样返回，兼容旧模板。
+    # 解析共用补丁片段占位符（消除 _tmp.tex / main.tex 双源漂移）；缺失则原样返回，兼容旧模板。
     tpl_text = resolve_shared_preamble(tpl_text)
     target = "\\input{" + PLACEHOLDER + "}"
     if target not in tpl_text:
@@ -98,7 +117,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[fix] 源: {src} -> 中间文件: {dst.name} ({dst.stat().st_size} bytes)")
     print(f"[fix] 单章编译入口: {tmp} ({tmp.stat().st_size} bytes)")
-    print("[fix] 下一步: xelatex -halt-on-error -interaction=nonstopmode _tmp.tex")
+    print(f"[fix] 下一步: python -m pdfmaker compile {args.chapter}"
+          "（自动定位 xelatex，编译两遍 + 日志体检）")
     return 0
 
 

@@ -1,64 +1,71 @@
 # -*- coding: utf-8 -*-
-"""overflow —— xelatex 编译日志体检（体检之三，阻断级）。
+r"""overflow —— xelatex 编译日志体检（体检之三，阻断级）。
 
 编译完成后，解析 xelatex 生成的 .log，汇总「会让成品出问题的」信号，
 作为单章 / 整书交付前的最后一道卡口。
 
 检查项（阻断级：存在即非零退出）
----------------------------------
-- Overfull \\hbox       ：段落 / 显示公式 / 节点文字溢出页面宽度。
+--------------------------------
+- Overfull \hbox        ：段落 / 显示公式 / 节点文字溢出页面宽度。
 - Missing character     ：字体缺失（豆腐块 / 空白）。
-- multiply-defined      ：同一 \\label 跨章重名，导致 \\ref 指向错误编号。
+- multiply-defined      ：同一 \label 跨章重名，导致 \ref 指向错误编号。
 - undefined references  ：引用断链（??）。
 - LaTeX Error / Fatal   ：编译致命错误。
 
-非阻断（仅提示）：Underfull \\hbox（松散度警告，不强制）。
+降级与豁免
+----------
+- 代码/逐字环境（verbatim/codeblock/lstlisting）与显示公式环境内的 Overfull
+  不可断词、超宽仅影响美观 → 降级为警告（仍打印，不计入阻断）。
+- Overfull \vbox（高度溢出）与 Underfull \hbox/vbox（松散度警告）仅提示，不阻断。
 
 发现 Overfull 时会打印前若干条所在行（含 at lines X--Y），便于直接定位源码；
 并按溢出宽度给出常见根因与修复方向，减少排错时间。
 
-退出码：0 阻断级信号全清；非 0 存在阻断级问题或找不到日志。
+源行号映射
+----------
+日志里的 ``at lines A--B`` 指向的是**归一化副本**（chN.tex / _build/第N章.tex）的行号，
+不是作者编辑的源文件（第N章/第N章.tex）。本命令对每条阻断级 Overfull 做三级
+best-effort 源定位：
+1. **内容锚定**：从日志的 hbox 上下文提取长标识符，回源文件精确匹配（允许 ``\_`` 变体）；
+2. **行号对齐**：用 difflib 对齐作者源与归一化副本的行序列，吸收 normalize 增行漂移；
+3. **原样回退**：无法映射时保留日志行号并明确标注「归一化副本行号」。
+若定位落入表格（tabularx/table）内部，还会列出该表中含超长不可断长串的候选行
+（复用 core.lint.scan_squeezed_tables），直接指出「哪一格」而非只指到 \end{tabularx}。
+
+退出码
+------
+0 阻断级信号全清；1 存在阻断级问题；找不到日志时 SystemExit。
 """
 
 import argparse
+import difflib
 import re
 import sys
 from pathlib import Path
 
+from pdfmaker.core.lint import scan_squeezed_tables
 from pdfmaker.core.paths import setup_utf8
 
 setup_utf8()
 
 MAX_SHOWN = 8   # Overfull 明细最多打印几条
+LOG_NAMES = ("_tmp.log", "main.log", "book.log")  # 自动寻找时的候选日志文件名
 
 
 def _search_up(name: str) -> Path | None:
-    """从 cwd 向上回溯（到盘符根），找名为 name 的日志文件。"""
-    cur = Path.cwd()
-    seen: set[Path] = set()
-    for _ in range(12):
-        cand = cur / name
+    """从 CWD 沿祖先链向上回溯，找名为 name 的日志文件。"""
+    for base in [Path.cwd(), *Path.cwd().parents]:
+        cand = base / name
         if cand.exists():
             return cand
-        parent = cur.parent
-        if parent == cur or parent in seen:
-            break
-        seen.add(parent)
-        cur = parent
     return None
 
 
 def find_log() -> Path | None:
-    """在当前目录、脚本目录、脚本父目录，以及 cwd 祖先链中寻找常见日志文件名。"""
+    """在 CWD、脚本目录及其父目录、CWD 祖先链中寻找常见日志文件名。"""
     here = Path(__file__).parent
-    bases = [Path.cwd(), here, here.parent]
-    cur = Path.cwd()
-    for _ in range(12):
-        cur = cur.parent
-        if cur == cur.parent:
-            break
-        bases.append(cur)
-    for cand in ("_tmp.log", "main.log", "book.log"):
+    bases = [Path.cwd(), here, here.parent, *Path.cwd().parents]
+    for cand in LOG_NAMES:
         for base in bases:
             p = base / cand
             if p.exists():
@@ -72,8 +79,8 @@ _CODE_ENV_RE = re.compile(
 )
 
 
-def _codeblock_line_ranges(tex: str) -> "list[tuple[int, int]]":
-    """返回 tex 中 verbatim/codeblock/lstlisting 环境的 (起,止) 行号区间（含边界，1-based）。"""
+def _codeblock_line_ranges(tex: str) -> list[tuple[int, int]]:
+    """返回 tex 中 verbatim/codeblock/lstlisting 环境的 (起, 止) 行号区间（含边界，1-based）。"""
     ranges: list[tuple[int, int]] = []
     for m in _CODE_ENV_RE.finditer(tex):
         start = tex[:m.start()].count("\n") + 1
@@ -83,10 +90,9 @@ def _codeblock_line_ranges(tex: str) -> "list[tuple[int, int]]":
 
 
 # 显示公式环境：其长行超宽仅影响美观、不影响编译正确性 → 与代码块同待遇降级为警告。
-# 原白名单只含 equation/align/gather/multline/flalign/alignat/displaymath/math，
-# 漏掉了 array/matrix/pmatrix/bmatrix/vmatrix/Vmatrix/Bmatrix/cases/split/smallmatrix/
-# aligned/gathered 等 AMS 数学环境——这些环境内公式超宽仍被硬阻断，与 align 内降级
-# 行为不一致（某章 VMD 公式是 array 超宽，当时只能手动拆行绕过）。一并纳入降级白名单。
+# 白名单覆盖 AMS 数学环境全家桶（equation/align/gather/multline/flalign/alignat/
+# displaymath/math 及 array/matrix/pmatrix/bmatrix/vmatrix/Vmatrix/Bmatrix/cases/
+# split/smallmatrix/aligned/gathered），避免「align 内降级、array 内却硬阻断」的不一致。
 _MATH_ENV_RE = re.compile(
     r"\\begin\{(equation|equation\*|align|align\*|gather|gather\*|multline|multline\*|"
     r"flalign|flalign\*|alignat|alignat\*|displaymath|math|"
@@ -97,8 +103,8 @@ _MATH_ENV_RE = re.compile(
 )
 
 
-def _math_env_line_ranges(tex: str) -> "list[tuple[int, int]]":
-    """返回 tex 中显示公式环境的 (起,止) 行号区间（含边界，1-based）。"""
+def _math_env_line_ranges(tex: str) -> list[tuple[int, int]]:
+    """返回 tex 中显示公式环境的 (起, 止) 行号区间（含边界，1-based）。"""
     ranges: list[tuple[int, int]] = []
     for m in _MATH_ENV_RE.finditer(tex):
         start = tex[:m.start()].count("\n") + 1
@@ -107,7 +113,7 @@ def _math_env_line_ranges(tex: str) -> "list[tuple[int, int]]":
     return ranges
 
 
-def _collect_source_texts(log_path: "Path") -> "list[Path]":
+def _collect_source_texts(log_path: Path) -> list[Path]:
     """收集日志同目录（含子目录兜底）下全部章节 / 附录源码 .tex，供 Overfull 降级统一判定。
 
     - 单章 SOP 以 cwd=章目录编译 ``_tmp.tex``（其 ``\\input`` 该章的 ``chN.tex``），章目录含
@@ -123,7 +129,7 @@ def _collect_source_texts(log_path: "Path") -> "list[Path]":
     cands: list[Path] = []
     for p in pats:
         cands.extend(sorted(d.glob(p)))
-    if not cands:  # 平铺未命中（如子目录布局）则递归一层兜底
+    if not cands:  # 平铺未命中（如子目录兜底）则递归一层兜底
         for p in pats:
             cands.extend(sorted(d.rglob(p)))
     seen: set[Path] = set()
@@ -137,6 +143,186 @@ def _collect_source_texts(log_path: "Path") -> "list[Path]":
             continue
         out.append(c)
     return out
+
+
+# ---- Overfull 源行号映射（归一化副本行号 → 作者源文件行号） ----
+# 日志的 at lines A--B 指向 chN.tex / _build/第N章.tex（归一化副本），不是作者编辑的
+# 第N章/第N章.tex。以下三级 best-effort 定位：内容锚定（精确）→ difflib 行对齐
+# （结构化）→ 原样回退（标注「归一化副本行号」）。
+_TEX_TOKEN_RE = re.compile(r"\((?:\./)?([^\s()]+\.tex)")
+
+
+def _current_tex_guess(txt: str, pos: int) -> str | None:
+    """返回日志位置 pos 之前**最近打开的** .tex 文件（启发式）。
+
+    LaTeX 用圆括号跟踪文件开关，但日志消息（含 Overfull 行自身）也大量出现括号，
+    精确维护弹栈不可靠；而实践中章节文件打开后其内容才被处理——「最近打开者」
+    在单章与整书两种布局下都是足够好的猜测。失败返回 None 时由
+    内容锚定在所有候选源文件里兜底（不依赖本函数）。
+    """
+    last: str | None = None
+    for m in _TEX_TOKEN_RE.finditer(txt, 0, pos):
+        last = m.group(1)
+    return last
+
+
+def _candidate_originals(log: Path) -> list[Path]:
+    """收集可能的作者源文件：单章布局（同目录 第N章.tex）与整书布局（项目根章目录）。"""
+    d = log.parent.resolve()
+    out: list[Path] = []
+    seen: set[Path] = set()
+    for c in (sorted(d.glob("第*章.tex"))
+              + sorted(d.glob("附录*.tex"))
+              + sorted(d.parent.glob("第*章/第*章.tex"))
+              + sorted(d.parent.glob("附录*/附录*.tex"))):
+        rc = c.resolve()
+        if rc in seen:
+            continue
+        seen.add(rc)
+        out.append(c)
+    return out
+
+
+def _resolve_pair(log: Path, open_file: str | None) -> tuple[Path, Path] | None:
+    """把日志打开文件解析为（归一化副本, 作者源文件）对；无法解析返回 None。"""
+    if not open_file:
+        return None
+    d = log.parent.resolve()
+    name = Path(open_file).name
+    m = re.fullmatch(r"ch(\d+)\.tex", name)
+    if m:  # 单章布局：chN.tex → 同目录 第N章.tex
+        orig = d / f"第{m.group(1)}章.tex"
+        return (d / name, orig) if orig.exists() else None
+    if (name.startswith("第") or name.startswith("附录")) and name.endswith(".tex"):
+        orig = d.parent / name[:-4] / name  # _build 归一副本 → 项目根章目录原件
+        if orig.exists():
+            return (d / name, orig)
+    return None
+
+
+def _anchor_tokens(context: str) -> list[str]:
+    """从日志 hbox 上下文提取候选锚点标识符（长者优先，最多 4 个）。"""
+    ctx = re.sub(r"\\TU/\S*", " ", context)  # 字体标记（\TU/lmtt/m/n/10.95 等）
+    toks = re.findall(r"[A-Za-z][A-Za-z0-9_.]{7,}", ctx)
+    seen: list[str] = []
+    for t in toks:
+        if t not in seen:
+            seen.append(t)
+    return sorted(seen, key=len, reverse=True)[:4]
+
+
+def _find_anchor(text: str, token: str) -> int | None:
+    """在源文本中精确匹配锚点（允许 \\_ 变体），命中返回 1-based 行号。"""
+    pat = re.compile(re.escape(token).replace("_", r"\\?_"))
+    m = pat.search(text)
+    if not m:
+        return None
+    return text.count("\n", 0, m.start()) + 1
+
+
+def _build_line_map(orig_text: str, norm_text: str):
+    """用 difflib 对齐作者源与归一化副本的行序列，返回 chN 行号 → 源行号 的映射函数。
+
+    归一化（normalize_text）以「行内改写 + 少量增行」为主，difflib 的匹配块
+    能精确吸收 wrap_tikz 等造成的行数漂移，比「按注入数折算」稳健。
+    """
+    sm = difflib.SequenceMatcher(
+        None, orig_text.split("\n"), norm_text.split("\n"), autojunk=False
+    )
+    blocks = sm.get_matching_blocks()
+
+    def to_orig(ch_line1: int) -> int:
+        i = ch_line1 - 1
+        best = None
+        for blk in blocks:
+            if blk.b <= i < blk.b + blk.size:
+                return blk.a + (i - blk.b) + 1
+            if blk.b + blk.size <= i:
+                best = blk
+        if best is not None:
+            return best.a + best.size  # 落在非匹配区：钳到上一匹配块末尾
+        return 1
+
+    return to_orig
+
+
+def _table_hints(orig_text: str, src_line: int) -> list[dict]:
+    """若源行落入 tabularx 内，返回该表中含超长不可断长串的候选单元格（行号为全文行号）。"""
+    lines = orig_text.split("\n")
+    idx = src_line - 1
+    if idx < 0 or idx >= len(lines):
+        return []
+    # 后向寻找 \begin{tabularx}：跳过 \end{tabularx}/\end{table} 边界行（表格
+    # Overfull 的日志行号常落在这些边界上）；撞到 \begin{table} 或章节标题
+    # 则说明该位置在表格之外。
+    begin = None
+    for i in range(idx, -1, -1):
+        if r"\begin{tabularx}" in lines[i]:
+            begin = i
+            break
+        if r"\end{tabularx}" in lines[i] or r"\end{table}" in lines[i]:
+            continue
+        if r"\begin{table}" in lines[i] or "\\section" in lines[i] or "\\chapter" in lines[i]:
+            return []  # 在表格之外
+    if begin is None:
+        return []
+    end = None
+    for i in range(begin + 1, len(lines)):
+        if r"\end{tabularx}" in lines[i]:
+            end = i
+            break
+    if end is None:
+        return []
+    block = "\n".join(lines[begin:end + 1])
+    hits = scan_squeezed_tables(block, threshold=20)
+    for h in hits:
+        h["line"] += begin  # block 内 1-based → 全文 1-based
+    return hits[:3]
+
+
+def _locate_overfull(log: Path, txt: str, a: int, pos: int,
+                     _pair_cache: dict, _text_cache: dict) -> dict | None:
+    """对一条阻断级 Overfull 做源定位，返回 {file, line, method, content, hints} 或 None。"""
+    open_file = _current_tex_guess(txt, pos)
+    # 锚点上下文从 Overfull 行的**下一行**开始（本行的 Overfull/paragraph/lines
+    # 等日志词汇会成为噪声锚点），取后续 hbox 排版内容。
+    ctx_start = txt.find("\n", pos)
+    context = txt[ctx_start:ctx_start + 600] if ctx_start != -1 else ""
+    tokens = _anchor_tokens(context)
+    candidates = _candidate_originals(log)
+
+    def _read(p: Path) -> str:
+        if p not in _text_cache:
+            try:
+                _text_cache[p] = p.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                _text_cache[p] = ""
+        return _text_cache[p]
+
+    # 第一级：内容锚定（在所有候选源文件中精确匹配，不依赖 paren 栈的正确性）
+    for token in tokens:
+        for cand in candidates:
+            hit = _find_anchor(_read(cand), token)
+            if hit:
+                return {
+                    "file": cand.name, "line": hit, "method": "内容锚定",
+                    "content": _read(cand).split("\n")[hit - 1].strip()[:100],
+                    "hints": _table_hints(_read(cand), hit),
+                }
+    # 第二级：difflib 行对齐（需要解析出 归一化副本→作者源 的配对）
+    pair = _resolve_pair(log, open_file)
+    if pair is not None:
+        norm, orig = pair
+        if pair not in _pair_cache:
+            _pair_cache[pair] = _build_line_map(_read(orig), _read(norm))
+        src_line = _pair_cache[pair](a)
+        lines = _read(orig).split("\n")
+        content = lines[src_line - 1].strip()[:100] if 0 < src_line <= len(lines) else ""
+        return {
+            "file": orig.name, "line": src_line, "method": "行号对齐",
+            "content": content, "hints": _table_hints(_read(orig), src_line),
+        }
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -174,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
     txt = log.read_text(encoding="utf-8", errors="ignore")
 
     # hbox（too wide，宽度溢出，可能阻断）与 vbox（too high，高度溢出，仅警告）分别计数，
-    # 避免把 vbox 误算进「Overfull \hbox」总数（旧实现用 (?:hbox|vbox) 合并计数，标签误导）。
+    # 避免把 vbox 误算进「Overfull \hbox」总数。
     overfull_hbox_count = len(re.findall(r"Overfull \\hbox", txt))
     overfull_vbox_count = len(re.findall(r"Overfull \\vbox", txt))
     # 提取每条 Overfull \hbox（too wide）的源码行区间（at lines A--B / at line A），用于代码块降级判定。
@@ -197,11 +383,11 @@ def main(argv: list[str] | None = None) -> int:
     # 超宽仅影响美观、不影响编译正确性 → 降级为警告（仍打印，但不计入阻断）。
     code_ranges: list[tuple[int, int]] = []
     math_ranges: list[tuple[int, int]] = []
-    for _st in _collect_source_texts(log):
+    for src_path in _collect_source_texts(log):
         try:
-            _t = _st.read_text(encoding="utf-8", errors="ignore")
-            code_ranges += _codeblock_line_ranges(_t)
-            math_ranges += _math_env_line_ranges(_t)
+            src_text = src_path.read_text(encoding="utf-8", errors="ignore")
+            code_ranges += _codeblock_line_ranges(src_text)
+            math_ranges += _math_env_line_ranges(src_text)
         except Exception:
             continue
     overfull_code: list[tuple[int, int]] = []
@@ -246,16 +432,35 @@ def main(argv: list[str] | None = None) -> int:
     if overfull:
         # 逐行抓取：LaTeX 会把 "Overfull \hbox (Xpt too wide) in paragraph at lines A--B"
         # 打在同一行，这一行本身就含定位信息，直接展示即可。
-        print("\n前几条 Overfull 位置（去重）：")
+        # 对每条阻断级 Overfull 附「源文件行号」定位（内容锚定 / 行号对齐），
+        # 落入表格时再列出含超长不可断长串的候选单元格——直接指出「哪一格」。
+        print("\n前几条 Overfull 位置（去重，附源文件定位）：")
         seen: set[str] = set()
-        for line in re.findall(r"^Overfull.*$", txt, flags=re.MULTILINE):
-            snippet = line.strip()
+        shown = 0
+        _pair_cache: dict = {}
+        _text_cache: dict = {}
+        for m in re.finditer(r"^Overfull \\hbox[^\n]*$", txt, flags=re.MULTILINE):
+            snippet = m.group(0).strip()
             key = snippet[:60]
             if key in seen:
                 continue
             seen.add(key)
             print(f"  - {snippet[:140]}")
-            if len(seen) >= MAX_SHOWN:
+            lm = re.search(r"at lines? (\d+)(?:--(\d+))?", snippet)
+            if lm:
+                loc = _locate_overfull(log, txt, int(lm.group(1)), m.start(),
+                                       _pair_cache, _text_cache)
+                if loc:
+                    print(f"      → 源定位：{loc['file']} 行 {loc['line']}（{loc['method']}）")
+                    if loc["content"]:
+                        print(f"      内容：{loc['content']}")
+                    for h in loc["hints"]:
+                        print(f"      表格候选：行 {h['line']}（第 {h['col']} 列）"
+                              f" {h['run']}（{h['length']} 字形）")
+                else:
+                    print("      → 源定位：未能映射（上方行号为归一化副本 chN/_build 行号）")
+            shown += 1
+            if shown >= MAX_SHOWN:
                 break
         if not seen:
             print("  （日志中未能提取到明细行，请直接搜索日志里的 Overfull）")
@@ -287,7 +492,7 @@ def main(argv: list[str] | None = None) -> int:
             print("  • 溢出较大(>35pt)：存在不可断词长串或双栏过窄。缩短该行内容 / 改用 p{宽度} 列"
                   " / 缩小字号 / 拆词。")
         print("  • TikZ 节点内 `\\\\` 无 align= 会触发 missing \\item Fatal"
-              "（已由 balance 步骤 9 预检拦截，见上方阻断项）。")
+              "（已由 balance 步骤 10 预检拦截，见上方阻断项）。")
         print("  • 前置部分（序言/术语表）整宽表格：合并前 build 会专门预检 \\noindent。")
 
     blocking = bool(overfull or missing or multidef or undefref or fatal)

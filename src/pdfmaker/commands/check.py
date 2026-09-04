@@ -1,70 +1,76 @@
 # -*- coding: utf-8 -*-
-"""check —— 章节内容结构统计（体检之一）。
+"""check —— 章节内容结构统计与编译前门禁（体检之一）。
 
-对单个章节源文件做轻量静态统计分析，帮助判断「这一章写得够不够、结构是否完整」。
+对单个章节源文件做轻量静态统计分析，帮助判断「这一章写得够不够、结构是否完整」，
+并把排版退化与悬空引用挡在 xelatex 之前。
 
 检查项
 ------
-- 中文字数（去除表格 / 图 / verbatim / verb 块后的正文）。
-- TeX 字节数。
-- 章节层级计数：chapter / section / subsection / subsubsection。
-- 元素计数：tikz 图、table、verbatim、multirow、bibitem、链接（url + href）。
-- 编译前风险预检（warning 级，不阻断）：扫描「CJK 字体缺字」风险字符
-  （≥ ≤ ≈ ≠ ①-⑩ 等）与疑似被截断的残破 URL，把 xelatex 的 Missing character /
-  验活失败挡在编译之前。
-- 排版样式门禁（阻断级）：三线表须用 booktabs 规则（禁用裸 ``\\hline`` 与列格式竖线
-  ``|``，**且必须含** ``\\toprule``/``\\bottomrule`` 顶底线，裸表格无规则线也阻断），
-  伪代码/代码块须用共享 preamble 的 ``codeblock`` 环境（禁用裸 ``verbatim`` /
-  ``lstlisting``），且 **表题须在上、图题须在下**（caption 位置错位也阻断）。退化/不规范
-  写法直接 exit 1 阻断，防止后续章节回归（第 10–12 章曾退化，已回填；已强化规则线
-  齐全与 caption 位置）。
-- 字数硬门禁：正文字数低于 ``--min-chars``（默认 ``CHAPTER_MIN_CHARS``）时 exit 1 阻断；
-  附录 / 短章可用 ``--no-gate`` 放行。
+- 字数统计：正文字数（cjk / visible 两种口径，均保留表格单元格文字）、TeX 字节数。
+- 结构计数：chapter / section / subsection / subsubsection 层级，tikz 图、table、
+  verbatim、multirow、bibitem、链接（url + href）元素。
+- 编译前风险预检（warning 级，不阻断）：缺字字符 / 截断 URL / TikZ 未转义 & /
+  代码块非 ASCII / 跨章 \\ref / 标题手写前导编号 / \\texttt 不可断行长串 /
+  tabularx 单列挤压。
+- 悬空引用门禁（阻断级）：正文 \\cite 键必须存在本文件 \\bibitem 定义，否则 exit 1。
+- 排版样式门禁（阻断级）：三线表禁用裸 \\hline 与列格式竖线 ``|`` 且必须含
+  \\toprule/\\bottomrule 顶底线；伪代码禁用裸 verbatim/lstlisting；表题须在上、
+  图题须在下。退化写法直接 exit 1 阻断，防止后续章节回归。
+- 字数门禁（默认告警级，--strict 阻断）：正文字数低于 ``--min-chars``（默认
+  ``CHAPTER_MIN_CHARS``）时打印 WARN 与具体缺口并 exit 0（不阻断）；
+  加 ``--strict`` 恢复硬阻断。附录 / 短章可用 ``--no-gate`` 关闭评估。
 
-退出码：0 达标 / 1 排版样式违规 或 字数低于硬门禁下限（或源文件缺失）。
+退出码
+------
+0 达标（或字数未达标但未开 --strict）；1 排版样式违规 / 悬空引用 / --strict 下字数不足（或源文件缺失）。
 """
 
 import argparse
 import re
 import sys
 
+import pdfmaker.core.config as cfg
 from pdfmaker.core import (
     char_count,
     chinese_count,
     count_visible_body,
     resolve_source,
-    scan_codeblock_nonascii,
+    scan_caption_position,
     scan_cite_undef,
+    scan_codeblock_nonascii,
     scan_crossref,
     scan_glyphs,
     scan_raw_verbatim,
-    scan_table_style,
+    scan_redundant_heading_number,
+    scan_squeezed_tables,
     scan_table_rules,
-    scan_caption_position,
+    scan_table_style,
     scan_tikz_amp,
     scan_truncated_urls,
-    scan_redundant_heading_number,
+    scan_unbreakable_runs,
     setup_utf8,
     strip_latex_comments,
     strip_nonbody,
 )
-import pdfmaker.core.config as cfg
+from pdfmaker.core.watchdog import ScanTimeoutError, scan_watchdog
 
 setup_utf8()
 
 
 def evaluate_gate(count: int, min_chars: int, max_chars: int = 0,
                   no_gate: bool = False) -> tuple[bool, str]:
-    """字数硬门禁判定，返回 (passed, message)。
+    """字数门禁判定，返回 (passed, message)。
 
-    - no_gate=True：仅统计不阻断，永远 passed。
-    - count < min_chars：未通过（过短），main 应 exit 1。
-    - max_chars > 0 且 count > max_chars：未通过（过长），main 应 exit 1。
+    - no_gate=True：仅统计不评估，永远 passed；
+    - count < min_chars：未达标（过短）；默认仅告警（main exit 0），--strict 才 exit 1；
+    - max_chars > 0 且 count > max_chars：未达标（过长），处理同过短；
     - 否则通过。max_chars=0 表示不限制上限（延续「字数/引用不设上限」的宽松哲学）。
-    抽成纯函数便于复用，避免依赖文件系统。
+
+    抽成纯函数便于复用，避免依赖文件系统。注意：本函数只管「达标与否」的判定，
+    阻断/告警的策略差异在 main 中体现（默认告警，避免内容已达标时被迫注水）。
     """
     if no_gate:
-        return True, "字数门禁已关闭（--no-gate）：仅统计，不阻断。"
+        return True, "字数门禁已关闭（--no-gate）：仅统计，不评估。"
     if count < min_chars:
         return False, f"字数不足：{count} < 下限 {min_chars}"
     if max_chars > 0 and count > max_chars:
@@ -75,39 +81,58 @@ def evaluate_gate(count: int, min_chars: int, max_chars: int = 0,
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="pdfmaker check",
-        description="章节内容结构统计（字数 / 层级 / 元素）",
+        description="章节内容结构统计 + 编译前风险预检 + 排版样式/字数门禁",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "示例:\n"
             "  python -m pdfmaker check 4       # 统计第 4 章\n"
             "  python -m pdfmaker check 附录A    # 统计附录 A\n\n"
-            "只统计不阻断；达标判定见 balance。"
+            "结构均衡判定见 balance；边写边查可用 lint（仅提示不阻断）。"
         ),
     )
     parser.add_argument("chapter", nargs="?", default="1",
                         help="章节号（数字 N 或 附录X），默认第 1 章")
     parser.add_argument("--min-chars", type=int, default=None,
-                        help=f"字数硬门禁下限（默认 {cfg.CHAPTER_MIN_CHARS}；低于则 exit 1）")
+                        help=f"字数下限参考值（默认 {cfg.CHAPTER_MIN_CHARS}；低于仅告警不阻断，"
+                             f"--strict 时才 exit 1）")
     parser.add_argument("--max-chars", type=int, default=None,
-                        help=f"字数硬门禁上限（默认 {cfg.CHAPTER_MAX_CHARS}，0=不限制；高于则 exit 1）")
+                        help=f"字数上限参考值（默认 {cfg.CHAPTER_MAX_CHARS}，0=不限制；策略同下限）")
     parser.add_argument("--no-gate", action="store_true",
-                        help="关闭字数硬门禁：仅统计不阻断（用于附录/短章等合法短章节）")
+                        help="完全关闭字数评估：仅统计，连告警也不打印（用于附录/短章等合法短章节）")
+    parser.add_argument("--strict", action="store_true",
+                        help="字数未达标时 exit 1 阻断（恢复硬门禁行为；"
+                             "默认仅告警——字数是内容厚度的主观代理指标，不应逼作者注水凑数）")
     parser.add_argument("--count-mode", choices=["cjk", "visible"], default=None,
                         help=f"字数计数口径（默认 {cfg.CHAPTER_COUNT_MODE}；"
                              "cjk=仅中文，visible=非空可见字符，与小节口径一致）")
     args = parser.parse_args(argv)
 
+    # 扫描看门狗：正则扫描若指数回溯会永久空转，超时按阻断处理（exit 1）
+    try:
+        with scan_watchdog(cfg.SCAN_TIMEOUT, "check"):
+            return _run(args)
+    except ScanTimeoutError:
+        print(
+            f"[check] 扫描超过 {cfg.SCAN_TIMEOUT:g}s 时限（疑似正则回溯或病态输入），"
+            f"exit 1 阻断。请检查章节源码中的未闭合定界符（如裸 $），"
+            f"或经 PDFMAKER_SCAN_TIMEOUT / .pdfmaker.toml 的 scan_timeout 放宽时限。",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _run(args) -> int:
+    """check 的扫描与门禁主体（在 main 的看门狗时限内运行）。"""
     src = resolve_source(args.chapter, "pdfmaker check")
     content = src.read_text(encoding="utf-8")
-    # 结构性统计前剥离 LaTeX 注释，避免注释行里的命令字样被误计（如文件头注释含 \\bibitem）
+    # 结构性统计前剥离 LaTeX 注释，避免注释行里的命令字样被误计（如文件头注释含 \bibitem）
     content_nc = strip_latex_comments(content)
 
-    # 去除表格 / 图 / verbatim / verb 块，只对正文统计中文字数
     n_url = len(re.findall(r"\\url\{", content_nc))
     n_href = len(re.findall(r"\\href\{", content_nc))
 
     count_mode = args.count_mode or cfg.CHAPTER_COUNT_MODE
-    # #172：visible 计数保留表格单元格文字（count_visible_body 内含 strip_nonbody），
+    # visible 计数保留表格单元格文字（count_visible_body 内含 strip_nonbody），
     # 避免「软章」被迫凑字；cjk 模式同样保留表格文字，口径一致。
     if count_mode == "visible":
         count = count_visible_body(content_nc)
@@ -153,7 +178,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("  [截断 URL] 未发现疑似截断链接 (OK)")
 
-    # ---- TikZ 节点未转义 & 预检（warning 级，不阻断） ----
     amp = scan_tikz_amp(content)
     if amp:
         print(f"  [TikZ &] 检测到 {len(amp)} 处节点文本内未转义 `&`（编译会 Missing $ inserted）：")
@@ -163,11 +187,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("  [TikZ &] 未发现未转义 & (OK)")
 
-    # ---- 代码块非 ASCII 预检（warning 级，不阻断） ----
-# 等宽字体（Latin Modern Mono）不含希腊字母/中文/全角符号，verbatim/codeblock/
-# lstlisting 内出现非 ASCII 会触发 xelatex 的 Missing character（特殊符号注释踩坑）。
-    # fix_glyphs 出于保护代码原样会跳过这些环境，故只能在此提前 warning，提示作者改用
-    # 纯 ASCII 或把说明移出代码块（与 glyph/trunc/tikz 同为编译前 warning 级预检）。
+    # 等宽字体（Latin Modern Mono）不含希腊字母/中文/全角符号，verbatim/codeblock/
+    # lstlisting 内出现非 ASCII 会触发 xelatex 的 Missing character。fix_glyphs 出于
+    # 保护代码原样会跳过这些环境，故只能在此提前 warning，提示作者改用纯 ASCII
+    # 或把说明移出代码块。
     nonascii = scan_codeblock_nonascii(content)
     if nonascii:
         print(f"  [代码块非ASCII] 检测到 {len(nonascii)} 处 verbatim/codeblock/lstlisting 内非 ASCII"
@@ -183,7 +206,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("  [代码块非ASCII] 未发现代码块内非 ASCII 字符 (OK)")
 
-    # ---- 跨章 \ref 预检（warning 级，不阻断；#158） ----
     # 本工具红线：跨章引用须写成硬编码「第~N 章」，禁用 \ref 跨章引用。单章写作时若顺手写
     # \ref{cha:c3} 指向其它章（本文件无该 label），提前 warning，提示改为硬编码文本；
     # 悬空 \ref（指向全书都不存在的 label）一并捕获。合并前 xref 会作阻断级校验。
@@ -197,10 +219,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("  [跨章ref] 未发现指向本文件外 label 的 \\ref (OK)")
 
-    # ---- 章节编号重复预检（warning 级，不阻断） ----
     # ctexrep 的 \chapter / \section / \subsection 会自动生成「第 X 章」/「X.Y」编号；
     # 标题里再手写前导编号会与自动编号叠加成「第 X 章 第 X 章」「X.Y X.Y …」的重复
-    # 编号（曾踩此坑）。脚手架已从素材标题剥离该前缀，此处兜底提示作者。
+    # 编号。脚手架已从素材标题剥离该前缀，此处兜底提示作者。
     red = scan_redundant_heading_number(content)
     if red:
         print(f"  [章节编号重复] 检测到 {len(red)} 处标题前导编号（会与 ctexrep 自动编号叠加重复）：")
@@ -212,8 +233,39 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print("  [章节编号重复] 未发现标题前导编号（OK）")
 
-    # ---- 悬空引用门禁（阻断级，exit 1；#173） ----
-    # 正文 \\cite 键必须存在本文件 \\bibitem 定义；否则 xelatex 报 Citation undefined、
+    # \texttt 等宽字体（Latin Modern Mono）禁用断词，且 / . _ : 等符号在文本模式不构成
+    # 断点；超过阈值的长串落在行尾附近即触发 Overfull \hbox——以往只能编译后读 log
+    # 才发现（overflow 硬卡口），此处提前到写作期预警（warning 级，不阻断）。
+    # 阈值 cfg.LONGRUN_WARN_CHARS（默认 25，0 = 关闭）。
+    longrun = scan_unbreakable_runs(content, threshold=cfg.LONGRUN_WARN_CHARS)
+    if longrun:
+        print(f"  [不可断行长串] 检测到 {len(longrun)} 处 \\texttt 等宽长串"
+              f"（≥{cfg.LONGRUN_WARN_CHARS} 字形；启发式预警——落在行尾附近时才可能 Overfull \\hbox）：")
+        for h in longrun[:10]:
+            print(f"    - 行 {h['line']}: {h['run']}（{h['length']} 字形）")
+        print("    提示：缩短标识符、在长串前后垫可断行中文、或用顿号等 CJK 标点代替 / 连排；"
+              "阈值可用 PDFMAKER_LONGRUN_WARN_CHARS / .pdfmaker.toml 调整。")
+    else:
+        print("  [不可断行长串] 未发现超长 \\texttt 等宽串 (OK)")
+
+    # tabularx 的 l/c/r 列不换行：单元格内的超长 \texttt 标识符会把该列撑宽、
+    # 把 X 列挤成窄条（单列挤压）。此处提前到写作期预警（warning 级，不阻断），
+    # 阈值 cfg.TABLE_SQUEEZE_WARN_CHARS（默认 20，0 = 关闭）。
+    squeeze = scan_squeezed_tables(content, threshold=cfg.TABLE_SQUEEZE_WARN_CHARS)
+    if squeeze:
+        print(f"  [单列挤压] 检测到 {len(squeeze)} 处 tabularx 非 X 列超长不可断长串"
+              f"（≥{cfg.TABLE_SQUEEZE_WARN_CHARS} 字形；该列会撑宽并挤压 X 列）：")
+        for h in squeeze[:10]:
+            print(f"    - 行 {h['line']}（第 {h['col']} 列，{h['letter']} 列）: "
+                  f"{h['run']}（{h['length']} 字形）")
+        print("    提示：改用 >{\\raggedright\\arraybackslash}p{宽度} 定宽换行列，"
+              "或给长串加 \\allowbreak（fix 会对 ≥阈值的长 \\texttt 自动插入）；"
+              "阈值可用 PDFMAKER_TABLE_SQUEEZE_WARN_CHARS / .pdfmaker.toml 调整。")
+    else:
+        print("  [单列挤压] 未发现 tabularx 非 X 列超长串 (OK)")
+
+    # ---- 悬空引用门禁（阻断级，exit 1） ----
+    # 正文 \cite 键必须存在本文件 \bibitem 定义；否则 xelatex 报 Citation undefined、
     # 正文出现「?」。balance 已在 SOP 偏后阶段校验，此处提前到编译前（xelatex 之前）
     # 拦截，与样式门禁同级，双保险。
     cite_undef = scan_cite_undef(content)
@@ -230,11 +282,10 @@ def main(argv: list[str] | None = None) -> int:
               "误删文献请补回，或核实键名拼写。")
         return 1
 
-    # ---- 排版样式门禁（阻断级；质量提升） ----
+    # ---- 排版样式门禁（阻断级，exit 1） ----
     # 三线表：禁用裸 \hline 与列格式竖线 |（须用 booktabs \toprule/\midrule/\bottomrule）。
     # 伪代码：禁用裸 verbatim/lstlisting（须用共享 preamble 的 codeblock 浅灰底环境）。
-    # 第 10–12 章曾退化为 \hline 网格表 + 裸 verbatim，已回填；此处固化为强制规范，
-    # 后续章节一旦再退化即阻断，避免回归（参考 SKILL.md「强制排版规范」）。
+    # 此处固化为强制规范，后续章节一旦退化即阻断，避免回归（参考 SKILL.md「强制排版规范」）。
     style_hits = (
         scan_table_style(content)
         + scan_raw_verbatim(content)
@@ -264,16 +315,30 @@ def main(argv: list[str] | None = None) -> int:
               "详见 SKILL.md「强制排版规范」一节。")
         return 1
 
-    # ---- 字数硬门禁（可阻断） ----
+    # ---- 字数门禁（默认告警不阻断；--strict 恢复硬阻断） ----
+    # 设计理由：字数是「内容厚度」的主观代理指标，与排版样式/悬空引用这类
+    # 客观错误不同——cjk 口径对中英混排技术写作系统性偏低，硬阻断曾逼出「凑字数注水」
+    # 的反模式。软化后：未达标打印 WARN 与具体缺口，由作者自行判断，不再强制返工。
     effective_min = args.min_chars if args.min_chars is not None else cfg.CHAPTER_MIN_CHARS
     effective_max = args.max_chars if args.max_chars is not None else cfg.CHAPTER_MAX_CHARS
     passed, msg = evaluate_gate(count, effective_min, effective_max, args.no_gate)
     if passed:
         print(f"\n  [OK] {msg}")
         return 0
-    print(f"\n  [FAIL] {msg}（check 硬门禁，exit 1）")
-    print("    建议扩充正文至下限以上；附录 / 短章可用 --no-gate 放行。")
-    return 1
+    level = "FAIL" if args.strict else "WARN"
+    tail = "（--strict 硬门禁，exit 1）" if args.strict else "（仅告警，不阻断；--strict 可恢复硬门禁）"
+    print(f"\n  [{level}] {msg}{tail}")
+    gap = effective_min - count
+    if gap > 0:
+        print(f"    还差 {gap} 字（{count_mode} 口径）。建议：")
+        print("      - 若内容确已达标，可忽略本告警；或在 .pdfmaker.toml 调低 chapter_min_chars")
+        print(f"      - 若仍在写作中，边写边查：python -m pdfmaker lint {args.chapter}（不阻断，随时复跑）")
+        if count_mode == "cjk":
+            print("      - 若本章英文/代码占比高，可用 --count-mode visible 重新计量，"
+                  "或在 .pdfmaker.toml 设 chapter_count_mode = \"visible\"")
+    else:
+        print(f"    超出 {-gap} 字（{count_mode} 口径）。可考虑拆分章节；附录可用 --no-gate 关闭评估。")
+    return 1 if args.strict else 0
 
 
 if __name__ == "__main__":

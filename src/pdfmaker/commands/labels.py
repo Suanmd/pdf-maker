@@ -11,34 +11,23 @@ LaTeX 取最后一次定义，会导致前面章节的 \\ref 全部指向错误�
 若某冲突 label 被「未定义它的章节」跨章引用，则中止并提示手工处理，
 绝不擅自改名（否则会产生 ?? 断链）。
 
-退出码：0 已完成（无论有无改动）；2 检测到跨章引用、中止改名。
+退出码
+------
+0 已完成（无论有无改动）；2 检测到跨章引用、中止改名。
 """
 
 import argparse
-import glob
 import re
 import sys
 from pathlib import Path
 
+from pdfmaker.core.chapters import collect_chapters
 from pdfmaker.core.paths import setup_utf8
 
 setup_utf8()
 
 LABEL_RE = re.compile(r"\\label\{([^}]+)\}")
 REF_RE = re.compile(r"\\(?:ref|cref|autoref|eqref|pageref)\{([^}]+)\}")
-
-from pdfmaker.core.chapters import chapter_sort_key
-
-
-def collect(root: Path) -> list[str]:
-    """收集所有章节 .tex：第N章/第N章.tex、第N章.tex、附录X/附录X.tex、附录X.tex。"""
-    pats = [
-        str(root / "第*章" / "第*章.tex"),
-        str(root / "第*章.tex"),
-        str(root / "附录*" / "附录*.tex"),
-        str(root / "附录*.tex"),
-    ]
-    return sorted({f for p in pats for f in glob.glob(p)}, key=chapter_sort_key)
 
 
 def chapter_key(f: str) -> str:
@@ -67,7 +56,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = Path(args.root)
-    files = collect(root)
+    # 章节枚举与整书合并 / 全量验活共用同一真源（core.chapters.collect_chapters），
+    # 覆盖标准布局与扁平布局，按章号数值排序。
+    files = collect_chapters(root)
     if not files:
         raise SystemExit(f"[labels] 在 {root} 找不到 第*章/第*章.tex 或 附录*/附录*.tex")
 
@@ -80,12 +71,12 @@ def main(argv: list[str] | None = None) -> int:
         for m in LABEL_RE.finditer(txt):
             defined.setdefault(m.group(1), set()).add(chap)
 
-    collide = {l: chs for l, chs in defined.items() if len(chs) > 1}
+    collide = {lab: chs for lab, chs in defined.items() if len(chs) > 1}
     print(f"[labels] 冲突 label 数：{len(collide)}")
-    for l, chs in sorted(collide.items()):
-        print(f"  {l}: 章节 {sorted(collide[l])}")
+    for lab, chs in sorted(collide.items()):
+        print(f"  {lab}: 章节 {sorted(chs)}")
 
-    # 跨章引用检查：冲突 label 被「未定义它的章节」引用 → 中止
+    # ---- 跨章引用检查：冲突 label 被「未定义它的章节」引用 → 中止 ----
     cross: dict[str, dict[str, int]] = {}
     for chap, txt in texts.items():
         for m in REF_RE.finditer(txt):
@@ -95,34 +86,38 @@ def main(argv: list[str] | None = None) -> int:
                 cross[lab][chap] += 1
     if cross:
         print("\n!!! 检测到跨章引用，中止自动改名，请手工处理：")
-        for l, cm in cross.items():
-            print(f"  {l}: 被非定义章节引用 {cm}")
+        for lab, cm in cross.items():
+            print(f"  {lab}: 被非定义章节引用 {cm}")
         return 2
 
-    # 构建改名映射并应用
+    # ---- 构建改名映射并应用 ----
     rename: dict[str, dict[str, str]] = {}
-    for l, chs in collide.items():
-        rename[l] = {}
+    for lab, chs in collide.items():
+        rename[lab] = {}
         for c in sorted(chs):
-            newl = f"{l}-ch{c}"
+            newl = f"{lab}-ch{c}"
             if newl in defined:
                 raise SystemExit(f"[labels] 目标名 {newl} 已存在，放弃。")
-            rename[l][c] = newl
+            rename[lab][c] = newl
+
+    if not collide:
+        print("[labels] 无跨章重复 label，无需改名。")
+        return 0
 
     print("\n应用改名：")
     for f in files:
         chap = chapter_key(f)
         txt = texts[chap]
         changed = 0
-        for l, chs in collide.items():
+        for lab, chs in collide.items():
             if chap not in chs:
                 continue
-            newl = rename[l][chap]
+            newl = rename[lab][chap]
             txt, n1 = re.subn(
-                r"\\label\{" + re.escape(l) + r"\}", r"\\label{" + newl + "}", txt
+                r"\\label\{" + re.escape(lab) + r"\}", r"\\label{" + newl + "}", txt
             )
             txt, n2 = re.subn(
-                r"\\(ref|cref|autoref|eqref|pageref)\{" + re.escape(l) + r"\}",
+                r"\\(ref|cref|autoref|eqref|pageref)\{" + re.escape(lab) + r"\}",
                 r"\\\1{" + newl + "}",
                 txt,
             )

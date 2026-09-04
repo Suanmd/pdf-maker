@@ -9,23 +9,31 @@
 ------
 - 本地格式校验：必须是纯 ASCII、无空白、http(s):// 开头的合法 URL。
 - 截断检测：URL 含 Unicode 省略号「…」、3+ 连续点（非 :// 部分）或空白，判为残破链接。
-- 联网验活（带重试与退避）：直连 2xx/3xx → LIVE；硬失效（404/410）→ DEAD；
-  鉴权/反爬/限流类（401/403/429）→ 仍算 LIVE（地址有效，只是访问受限/限流，绝不误杀）；
-  请求方式被拒（400/405/406/407）或鉴权/反爬（401/403/429）→ 仍算 LIVE
-  （服务端已响应、地址有效，绝不误杀真实链接）；超时/服务端错（5xx/408/425）→ 自动重试；
-  法律不可用（451）→ 转查 archive.org 快照，有则 ARCHIVE 否则 DEAD；
+- 联网验活（带重试与退避）：直连 2xx/3xx → LIVE；硬失效（404/410） → DEAD；
+  鉴权/反爬/限流类（401/403/429） → 仍算 LIVE（地址有效，只是访问受限/限流，绝不误杀）；
+  请求方式被拒（400/405/406/407） → 仍算 LIVE（服务端已响应、地址有效，绝不误杀）；
+  超时/服务端错（5xx/408/425） → 自动重试；
+  法律不可用（451） → 转查 archive.org 快照，有则 ARCHIVE 否则 DEAD；
   其余网络抖动 / 重试耗尽 → 查 archive，有快照 ARCHIVE，否则 TRANSIENT（按未验活，exit 2）。
-- 结果缓存：``--cache <path>`` 持久化验活结果（默认 ``~/.cache/pdfmaker/verify_cache.json``，
+- 软 404 内容指纹：页面返回 200 但内容指示「不存在/搜索/兜底」 → SUSPECT
+  （warning 级，须人工确认，不阻断）。
+- 豁免主机名单：``PDFMAKER_VERIFY_ALLOW_HOSTS`` / ``.pdfmaker.toml`` 的
+  ``verify_allow_hosts`` 列出的主机（内网、SSO 鉴权后可见）跳过联网探测，标记
+  EXEMPT——按已验证处理、不计 DEAD、不阻断；豁免只免验活，不免格式/截断预检。
+- 结果缓存：``--cache <path>`` 持久化验活结果（默认缓存目录：macOS 为
+  ``~/Library/Caches/pdfmaker/verify_cache.json``，其他平台为 ``~/.cache/pdfmaker/verify_cache.json``，
   新鲜期内且非 TRANSIENT 直接复用、不再联网）；``--refresh`` 强制重验。
 
 退出码
-  0  全部 URL 验活通过（LIVE 或 ARCHIVE），可继续。
-  1  存在 DEAD（硬失效/虚构）或 FORMAT（格式缺陷/截断）链接 —— 必须修正后重跑。
-  2  网络不可达（连通性探针失败）或存在 TRANSIENT（重试后仍无法确认、无快照）
-     —— 预警：URL 未验活，须联网环境重跑；若同时有 FORMAT/DEAD 也会一并列出。
+------
+0  全部 URL 验活通过（LIVE / ARCHIVE / EXEMPT），可继续。
+1  存在 DEAD（硬失效/虚构）或 FORMAT（格式缺陷/截断）链接 —— 必须修正后重跑。
+2  网络不可达（连通性探针失败）或存在 TRANSIENT（重试后仍无法确认、无快照）
+   —— 预警：URL 未验活，须联网环境重跑；若同时有 FORMAT/DEAD 也会一并列出。
 """
 
 import argparse
+import concurrent.futures
 import json
 import re
 import socket
@@ -34,22 +42,22 @@ import sys
 import time
 import urllib.error
 import urllib.request
-import concurrent.futures
 from pathlib import Path
-from urllib.parse import urlsplit, quote
+from urllib.parse import quote, urlparse, urlsplit
 
+# 可调参数统一从 core.config 收口；用模块别名访问（而非 from ... import X），
+# 确保运行时 toml / 环境变量覆盖能真正生效。
+import pdfmaker.core.config as cfg
 from pdfmaker.core import collect_chapters, resolve_source, setup_utf8
 
 setup_utf8()
-
-# ---- 可调参数：统一从 pdfmaker.core.config 收口（运行时经 cfg.X 读取，使 toml 覆盖生效） ----
-import pdfmaker.core.config as cfg
 
 URL_RE = re.compile(r"\\url\{([^{}]+)\}|\\href\{([^{}]+)\}\{")
 VERB_RE = re.compile(r"\\verb(.).*?\1", re.DOTALL)
 
 
 def extract_urls(tex: str) -> list[str]:
+    """从 TeX 源码抽取全部 URL（\\url 与 \\href 的第一参数），剔除 \\verb 逐字内容。"""
     tex = VERB_RE.sub("", tex)  # 去掉 \verb|...| 逐字内容，避免误计
     out = []
     for m in URL_RE.finditer(tex):
@@ -88,11 +96,11 @@ def probe_network() -> bool:
     return False
 
 
-def archive_has(url: str, timeout: "float | None" = None) -> tuple[bool, str]:
+def archive_has(url: str, timeout: float | None = None) -> tuple[bool, str]:
     """查 web.archive.org 是否有快照。返回 (有?, 快照URL)。
 
     注意：timeout 默认 None，函数体内取 ``cfg.URL_TIMEOUT``。
-    此前默认写成 ``= cfg.URL_TIMEOUT``，会在模块导入时冻结——一旦项目用
+    若默认写成 ``= cfg.URL_TIMEOUT``，会在模块导入时冻结——一旦项目用
     ``.pdfmaker.toml`` 的 ``url_timeout`` / 环境变量 ``PDFMAKER_URL_TIMEOUT`` 覆盖，
     覆盖值对 archive 兜底路径（_archive_or_dead 调用 archive_has 不传 timeout）
     完全不生效，与「运行时覆盖应处处生效」的约定矛盾。改为调用时解析 cfg 即可。
@@ -174,19 +182,19 @@ def _open_no_verify(url: str, timeout: float) -> int | None:
         return None
 
 
-def probe_one(url: str, retries: "int | None" = None,
-              timeout: "float | None" = None) -> tuple[str, str, str]:
-    """返回 (url, status, detail)。status ∈ LIVE/ARCHIVE/DEAD/TRANSIENT。
+def probe_one(url: str, retries: int | None = None,
+              timeout: float | None = None) -> tuple[str, str, str]:
+    """探测单个 URL，返回 (url, status, detail)。status ∈ LIVE/ARCHIVE/DEAD/TRANSIENT/SUSPECT。
 
     带重试与指数退避：网络抖动 / 5xx / 超时这类「疑似瞬断」会重试；
     404/410 这类硬失效直接判 DEAD；反爬类（4xx 非硬失效）转查 archive 兜底。
 
     TLS 校验失败（常见于 MITM 代理证书主机名不匹配）不再被误判为瞬断——
     改用「跳过证书校验」的上下文兜底重试一次：主机可达则按真实 HTTP 状态归类
-    （活链照常 LIVE、404 仍判 DEAD），主机真宕则按瞬断重试。``--timeout`` 参数
-    在此真正生效（旧实现误用了常量 cfg.URL_TIMEOUT）。
+    （活链照常 LIVE、404 仍判 DEAD），主机真宕则按瞬断重试。
 
-    retries / timeout 默认 None，函数体内取 cfg.MAX_RETRIES / cfg.URL_TIMEOUT。
+    retries / timeout 默认 None，函数体内取 cfg.MAX_RETRIES / cfg.URL_TIMEOUT
+    （运行时解析，保证 toml / 环境变量覆盖生效）。
     """
     if retries is None:
         retries = cfg.MAX_RETRIES
@@ -202,7 +210,7 @@ def probe_one(url: str, retries: "int | None" = None,
                 res = _classify_http(url, r.status)
                 if res is not None:
                     status, detail = res
-                    # #157：2xx 真实页面仍可能是「搜索/不存在/兜底」软 404。
+                    # 2xx 真实页面仍可能是「搜索/不存在/兜底」软 404。
                     # 读少量正文做内容指纹；命中强指示词则降级为 SUSPECT（warning，不阻断）。
                     if status == "LIVE":
                         body = _safe_read(r, 8192)
@@ -292,7 +300,7 @@ _SOFT404_INDICATORS = [
 
 
 def _looks_soft404(body: str) -> bool:
-    """轻量软 404 指纹：页面 200 但内容指示「不存在/搜索/兜底」→ 可疑。
+    """轻量软 404 指纹：页面 200 但内容指示「不存在/搜索/兜底」 → 可疑。
 
     仅命中强指示词才返回 True（warning 级，不阻断验活结论）。body 为空直接 False。
     """
@@ -302,16 +310,49 @@ def _looks_soft404(body: str) -> bool:
     return any(k in low for k in _SOFT404_INDICATORS)
 
 
+# ---- 验活豁免主机（内网 / 鉴权后可见的合法链接） ----
+def _host_of(url: str) -> str:
+    """提取 URL 的主机名（小写、不含端口）；解析失败返回空串。"""
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def host_allowed(url: str, allow_hosts: list[str] | None = None) -> bool:
+    """判断 URL 的主机是否在验活豁免名单（精确匹配或子域名后缀匹配）。
+
+    企业内网、SSO 鉴权后可见的链接对 verify 的匿名探测必然 401/403 或超时，
+    但它们是作者真实可访问的合法引用；列入 ``cfg.VERIFY_ALLOW_HOSTS`` 的主机
+    跳过联网探测，标记 EXEMPT（按已验证处理、不计 DEAD、不阻断）。
+    """
+    hosts = cfg.VERIFY_ALLOW_HOSTS if allow_hosts is None else allow_hosts
+    if not hosts:
+        return False
+    h = _host_of(url)
+    if not h:
+        return False
+    for a in hosts:
+        a = a.strip().lower()
+        if not a:
+            continue
+        if h == a or h.endswith("." + a):
+            return True
+    return False
+
+
 # ---- URL 验活结果缓存 ----
-# 避免对同一个 URL 反复联网（18 章 × 数十条链接极慢且受网络抖动影响），
+# 避免对同一个 URL 反复联网（多章 × 数十条链接极慢且受网络抖动影响），
 # 也支持离线复用「上次已知结果」。仅持久化确定结果（LIVE/ARCHIVE/DEAD），
 # 不缓存 TRANSIENT，以免误抑制后续重试。
 
 def _cache_path(override: str | None) -> Path:
+    """解析缓存文件路径：--cache 显式指定优先，否则用平台默认缓存目录。"""
     return Path(override) if override else (cfg.VERIFY_CACHE_DIR / cfg.VERIFY_CACHE_FILE)
 
 
 def load_cache(path: Path) -> dict:
+    """读取验活缓存；文件缺失或损坏时返回空字典。"""
     try:
         if path.exists():
             return json.loads(path.read_text(encoding="utf-8"))
@@ -321,6 +362,7 @@ def load_cache(path: Path) -> dict:
 
 
 def save_cache(path: Path, cache: dict) -> None:
+    """写化验活缓存；任何 IO 异常静默降级（缓存失败不影响主流程）。"""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -340,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
             "  python -m pdfmaker verify 第4章/第4章.tex  # 直接传 .tex 路径\n"
             "  python -m pdfmaker verify .              # 验活整书全部章节 URL\n"
             "  python -m pdfmaker verify --retries 5 4  # 自定义重试次数\n"
-            "  python -m pdfmaker verify --cache ~/.cache/pdfmaker/verify_cache.json 4  # 启用结果缓存\n"
+            "  python -m pdfmaker verify --cache ~/Library/Caches/pdfmaker/verify_cache.json 4  # 自定义缓存路径\n"
             "  python -m pdfmaker verify --refresh 4    # 忽略缓存，强制重新验活"
         ),
     )
@@ -395,8 +437,21 @@ def main(argv: list[str] | None = None) -> int:
         elif _looks_truncated(u):
             trunc_bad.append(u)
 
-    # 仅对格式合法、未截断的 URL 发起联网检测
-    testable = [u for u in uniq if u not in fmt_bad and u not in trunc_bad]
+    # 豁免主机（内网/鉴权后可见）：跳过联网探测，直接按已验证（EXEMPT）计入结果。
+    # 注意：豁免只免「验活」，不免格式/截断预检——残破链接即使在豁免主机也须修正。
+    exempt = [
+        u for u in uniq
+        if u not in fmt_bad and u not in trunc_bad and host_allowed(u)
+    ]
+    if exempt:
+        print(f"  ⛨ {len(exempt)} 个 URL 主机在豁免名单（cfg.VERIFY_ALLOW_HOSTS），"
+              f"跳过联网探测，按已验证处理（EXEMPT）。")
+
+    # 仅对格式合法、未截断、且不在豁免名单的 URL 发起联网检测
+    testable = [
+        u for u in uniq
+        if u not in fmt_bad and u not in trunc_bad and u not in exempt
+    ]
 
     # 连通性探针；默认探针主机全不可达时，回退探测真实目标主机是否在线
     online = probe_network()
@@ -459,9 +514,8 @@ def main(argv: list[str] | None = None) -> int:
         save_cache(cache_path, cache)
     elif testable:
         # 离线：合并新鲜缓存中确定性结论（LIVE/ARCHIVE/DEAD），未缓存/过期项判 TRANSIENT。
-        # 旧实现仅当「全部 URL 都有新鲜缓存」才复用，否则整段丢弃缓存、直接 exit 2 且不打印
-        # 任何 URL 明细。现改为「能复用多少复用多少」，未缓存项单独标 TRANSIENT 并在
-        # 明细中可见，让作者清楚哪些链接确实没验活。
+        # 「能复用多少复用多少」，未缓存项单独标 TRANSIENT 并在明细中可见，
+        # 让作者清楚哪些链接确实没验活。
         cached_res = [
             (u, cache[u]["status"], cache[u]["detail"])
             for u in testable
@@ -486,16 +540,22 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("  ⚠️ 网络不可达（连通性探针失败）。URL 存活检测【未执行】。")
     else:
-        # testable 为空（全部 URL 因格式/截断被排除）：无需联网判定，结果留空，
-        # 下方决策阶段会按 FORMAT/TRUNC 处理，不会误判 exit 2。
-        print("  ⚠️ 网络不可达（连通性探针失败）。所有 URL 均已因格式/截断被排除，无需联网判定。")
+        # testable 为空（全部 URL 因格式/截断/豁免被分流）：无需联网判定，结果留空，
+        # 下方决策阶段会按 FORMAT/TRUNC/EXEMPT 处理，不会误判 exit 2。
+        if not exempt:
+            print("  ⚠️ 网络不可达（连通性探针失败）。所有 URL 均已因格式/截断被排除，无需联网判定。")
 
-    # 汇总
+    # 豁免主机结果并入汇总（EXEMPT：按已验证处理，不计 DEAD、不阻断）。
+    for u in exempt:
+        results.append((u, "EXEMPT", "主机在验活豁免名单（内网/鉴权后可见），按已验证处理"))
+
+    # ---- 汇总 ----
     live = [r for r in results if r[1] == "LIVE"]
     arch = [r for r in results if r[1] == "ARCHIVE"]
     dead = [r for r in results if r[1] == "DEAD"]
     trans = [r for r in results if r[1] == "TRANSIENT"]
     suspect = [r for r in results if r[1] == "SUSPECT"]
+    exemp = [r for r in results if r[1] == "EXEMPT"]
 
     print("\n  结果明细：")
     for u in fmt_bad:
@@ -505,7 +565,7 @@ def main(argv: list[str] | None = None) -> int:
     if results:
         for u, st, det in results:
             mark = {"LIVE": "✔", "ARCHIVE": "⚠", "DEAD": "✘",
-                    "TRANSIENT": "?", "SUSPECT": "≈"}.get(st, "?")
+                    "TRANSIENT": "?", "SUSPECT": "≈", "EXEMPT": "⛨"}.get(st, "?")
             where = f"  [{origin.get(u, '?')}]" if len(sources) > 1 else ""
             print(f"    [{mark} {st}] {u}  — {det}{where}")
 
@@ -516,6 +576,8 @@ def main(argv: list[str] | None = None) -> int:
     if results:
         print(f"    验活通过(LIVE)     : {len(live)}")
         print(f"    存档兜底(ARCHIVE)  : {len(arch)}")
+        if exemp:
+            print(f"    豁免主机(EXEMPT)   : {len(exemp)}  （内网/鉴权后可见，按已验证处理）")
         print(f"    失效/虚构(DEAD)    : {len(dead)}")
         print(f"    未验活(TRANSIENT)  : {len(trans)}")
         print(f"    疑似软404(SUSPECT) : {len(suspect)}  （warning，须人工确认，不阻断）")
@@ -539,7 +601,9 @@ def main(argv: list[str] | None = None) -> int:
         # 避免把「200 但实为搜索/不存在页」的地址当真活链接交付。
         print(f"\n  [WARN] {len(suspect)} 个 URL 疑似软404（内容指纹命中，须人工确认）："
               f"如确为失效链接请替换为真实 LIVE 地址；确认无误可忽略。不影响验活结论（exit 0）。")
-    print("\n  [OK] 全部 URL 验活通过（LIVE + ARCHIVE）" + ("（含须人工确认的 SUSPECT）" if suspect else "") + "。")
+    ok_parts = "LIVE + ARCHIVE" + (" + EXEMPT" if exemp else "")
+    print("\n  [OK] 全部 URL 验活通过（" + ok_parts + "）"
+          + ("（含须人工确认的 SUSPECT）" if suspect else "") + "。")
     return 0
 
 

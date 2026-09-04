@@ -7,20 +7,22 @@
 ------
 1. 每个 section / subsection / subsubsection 的正文量是否达标（过少说明该节单薄）；
    section 完全空白为阻断级，其余为空/偏短为建议级。统计保留表格单元格文字，
-   避免「纯表格节」误判空白。用 char_count 统计「非空可见字符」（CJK + 拉丁 + 数字 + 标点），
-   而非仅数中文，避免「中英文混排/含少量公式的小节」被误判过短。
+   避免「纯表格节」误判空白。用 char_count 统计「非空可见字符」（CJK + 拉丁 + 数字
+   + 标点），而非仅数中文，避免「中英文混排/含少量公式的小节」被误判过短。
 2. 表格数量是否达到建议下限（建议告警，不阻断）。
 3. 配图数量是否达到建议下限（建议每章 ≥ 1 张，建议告警，不阻断）。
 4. bibitem 与链接数一致——每条文献都应带一个可核验的链接（阻断）。
-4b. 参考文献数量下限——每章至少 cfg.MIN_REFS(默认 6) 条 LIVE 引用（**建议告警，不阻断，
-    且引用数量不设上限**；移除任何引用/LIVE 引用上限设置）。
-5. 孤儿 bibitem：定义了条目却没有任何 \\cite 引用它（阻断）。
-6. 悬空 cite：\\cite 了某个键却没有对应的 \\bibitem（阻断）。
-7. 参考文献/正文含「疑似截断 URL」（含省略号/空白/3+ 连续点）→ 阻断。
-8. 可选标签告警：\\bibitem[label]{key} 会让编号变 label，仅建议不阻断。
-9. TikZ 节点 `\\` 换行（无 align=）阻断：编译期 missing \\item Fatal。
+5. 参考文献数量下限——cfg.MIN_REFS > 0 时才做建议级告警（默认 0 = 不设下限，
+   按需引用；零引用是合法形态）。
+6. 孤儿 bibitem：定义了条目却没有任何 \\cite 引用它（阻断）。
+7. 悬空 cite：\\cite 了某个键却没有对应的 \\bibitem（阻断）。
+8. 参考文献/正文含「疑似截断 URL」（含省略号/空白/3+ 连续点） → 阻断。
+9. 可选标签告警：\\bibitem[label]{key} 会让编号变 label，仅建议不阻断。
+10. TikZ 节点 ``\\\\`` 换行（无 align=）阻断：编译期 missing \\item Fatal。
+11. TikZ 节点未转义 ``&`` 阻断：编译期 Missing $ inserted / 对齐符错误。
 
 退出码（阻断/建议分明）
+----------------------
 0  无阻断级问题（仅建议项不算阻断，可正常继续）。
 1  存在任一阻断级问题（小节完全空白 / 引用不闭合 / bibitem 缺链接 / 截断 URL / TikZ 坏节点）。
 """
@@ -29,6 +31,7 @@ import argparse
 import re
 import sys
 
+import pdfmaker.core.config as cfg
 from pdfmaker.core import (
     char_count,
     resolve_source,
@@ -36,19 +39,19 @@ from pdfmaker.core import (
     scan_tikz_badbreak,
     scan_truncated_urls,
     setup_utf8,
-    strip_nonbody,
     strip_latex_comments,
+    strip_nonbody,
 )
-import pdfmaker.core.config as cfg
+from pdfmaker.core.watchdog import ScanTimeoutError, scan_watchdog
 
 setup_utf8()
 
 
 def count_figures(content: str) -> int:
-    """配图数 = 位图(\\includegraphics) + TikZ 矢量图(\\begin{tikzpicture})。
+    """配图数 = 位图（\\includegraphics）+ TikZ 矢量图（\\begin{tikzpicture}）。
 
-    两者都算「图」。旧实现只数 \\includegraphics，漏掉纯 TikZ 矢量图，
-    会让只有矢量图的章节被误判「缺图」。
+    两者都算「图」。只数 \\includegraphics 会漏掉纯 TikZ 矢量图，
+    让只有矢量图的章节被误判「缺图」。
     """
     image_count = len(re.findall(r"\\includegraphics", content))
     tikz_count = content.count("\\begin{tikzpicture}")
@@ -71,9 +74,25 @@ def main(argv: list[str] | None = None) -> int:
                         help="章节号（数字 N 或 附录X），默认第 1 章")
     args = parser.parse_args(argv)
 
+    # 扫描看门狗：正则扫描若指数回溯会永久空转，超时按阻断处理（exit 1）
+    try:
+        with scan_watchdog(cfg.SCAN_TIMEOUT, "balance"):
+            return _run(args)
+    except ScanTimeoutError:
+        print(
+            f"[balance] 扫描超过 {cfg.SCAN_TIMEOUT:g}s 时限（疑似正则回溯或病态输入），"
+            f"exit 1 阻断。请检查章节源码中的未闭合定界符，"
+            f"或经 PDFMAKER_SCAN_TIMEOUT / .pdfmaker.toml 的 scan_timeout 放宽时限。",
+            file=sys.stderr,
+        )
+        return 1
+
+
+def _run(args) -> int:
+    """balance 的均衡检查主体（在 main 的看门狗时限内运行）。"""
     src = resolve_source(args.chapter, "pdfmaker balance")
     content = src.read_text(encoding="utf-8")
-    # 结构性统计前剥离 LaTeX 注释，避免注释行里的命令字样被误计（如 \\bibitem / 注释掉的 tikz）
+    # 结构性统计前剥离 LaTeX 注释，避免注释行里的命令字样被误计（如 \bibitem / 注释掉的 tikz）
     content_nc = strip_latex_comments(content)
     body = strip_nonbody(content_nc)  # 保留表格单元格文字，骨架校验更准确
     # 去除 \verb|...| 等逐字内容，避免其中的 \url/\cite 字样被误判为真实命令
@@ -140,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
         advisory.append(f"表格数 {table_count} < 建议 {cfg.MIN_TABLES}")
 
     # ---- 3. 配图数（建议） ----
-    # 配图 = 位图(\\includegraphics) + TikZ 矢量图(\\begin{tikzpicture})——两者都是图。
+    # 配图 = 位图（\includegraphics）+ TikZ 矢量图（\begin{tikzpicture}）——两者都是图。
     image_count = len(re.findall(r"\\includegraphics", content_nc))
     tikz_count = content_nc.count("\\begin{tikzpicture}")
     figure_count = count_figures(content_nc)
@@ -148,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     if figure_count < cfg.MIN_IMAGES:
         advisory.append(f"配图数 {figure_count} < 建议 {cfg.MIN_IMAGES}，建议补充示意图/实拍/图表")
 
-    # ---- 4/5/6. 引用完整性 + 链接一致性 ----
+    # ---- 4/6/7. 引用完整性 + 链接一致性 ----
     bibitem_keys = re.findall(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^}]*)\}", no_verb)
     bibitem_count = len(bibitem_keys)
     link_count = len(re.findall(r"\\url\{", no_verb)) + len(re.findall(r"\\href\{", no_verb))
@@ -175,18 +194,19 @@ def main(argv: list[str] | None = None) -> int:
         blocking.append(f"bibitem({bibitem_count}) 与链接({link_count}) 数不一致")
         print("[阻断] bibitem 数与链接数不一致（每条文献应带一个可核验链接）!")
 
-    # ---- 4c. 参考文献数量下限（建议，不阻断） ----
-    # 每章至少 cfg.MIN_REFS(默认 6) 条 LIVE 引用，**无上限**——用户明确移除所有关于
-    # 引用/LIVE 引用的上限设置，故代码不存在任何 max_refs 常量/参数。仅下限告警，不阻断。
-    if bibitem_count < cfg.MIN_REFS:
+    # ---- 5. 参考文献数量建议（MIN_REFS > 0 时才生效，默认 0 不设下限） ----
+    # 哲学：引用是论证的需要而非章节配额；资料无外部文献时完全不写，
+    # 严禁为凑数而造引用。仅当项目经 PDFMAKER_MIN_REFS / .pdfmaker.toml 显式设置了
+    # 正整数下限时才打印建议。零引用章（bibitem==0 且 link==0）始终豁免。
+    zero_ref_chapter = (bibitem_count == 0 and link_count == 0)
+    if cfg.MIN_REFS > 0 and bibitem_count < cfg.MIN_REFS and not zero_ref_chapter:
         advisory.append(
-            f"参考文献数 {bibitem_count} < 建议下限 {cfg.MIN_REFS}"
-            f"（每章至少 {cfg.MIN_REFS} 条 LIVE 引用，无上限）"
+            f"参考文献数 {bibitem_count} < 项目建议下限 {cfg.MIN_REFS}"
         )
-        print(f"[建议] 参考文献仅 {bibitem_count} 条，建议每章至少 {cfg.MIN_REFS} "
-              f"条 LIVE 引用（不设上限，引用越多越好）。")
+        print(f"[建议] 参考文献仅 {bibitem_count} 条，低于项目设置的下限 {cfg.MIN_REFS} "
+              "条（建议按需核查）。")
 
-    # ---- 7. 截断 URL（阻断） ----
+    # ---- 8. 截断 URL（阻断） ----
     trunc = scan_truncated_urls(content_nc)
     if trunc:
         blocking.append(f"疑似截断 URL ×{len(trunc)}")
@@ -194,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
         for u in trunc[:10]:
             print(f"    - {u}")
 
-    # ---- 8. 可选标签提示（仅建议） ----
+    # ---- 9. 可选标签提示（仅建议） ----
     opt_labeled = re.findall(r"\\bibitem\s*\[[^\]]*\]", no_verb)
     if opt_labeled:
         advisory.append(f"{len(opt_labeled)} 处 \\bibitem[label] 建议改为 \\bibitem{{key}}")
@@ -203,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
             "建议改为 \\bibitem{key} 以保证从 [1] 顺序编号。"
         )
 
-    # ---- 9. TikZ 节点 `\\` 换行（无 align=）阻断：编译期 missing \item Fatal ----
+    # ---- 10. TikZ 节点 `\\` 换行（无 align=）阻断：编译期 missing \item Fatal ----
     tikz_hits = scan_tikz_badbreak(content_nc)
     if tikz_hits:
         blocking.append(
@@ -217,7 +237,7 @@ def main(argv: list[str] | None = None) -> int:
         print("    修复：在节点选项加 align=left（如 \\node[align=left]{A\\\\B}），"
               "或改用全角括号「（）」替代 \\\\ 换行。")
 
-    # ---- 10. TikZ 节点未转义 & 阻断：编译期 Missing $ inserted / 对齐符错误 ----
+    # ---- 11. TikZ 节点未转义 & 阻断：编译期 Missing $ inserted / 对齐符错误 ----
     tikz_amp = scan_tikz_amp(content_nc)
     if tikz_amp:
         blocking.append(

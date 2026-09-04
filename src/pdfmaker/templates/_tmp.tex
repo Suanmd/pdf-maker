@@ -30,23 +30,26 @@
 \usepackage{etoolbox}
 \usepackage{geometry}
 \geometry{margin=2.5cm}
-\usepackage{fancyhdr}
 
-% === 页面版式：与整书 main.tex 保持一致（twoside + 2.5cm + fancyhdr） ===
+% === 页面版式：与整书 main.tex 保持一致（twoside + 2.5cm + 同款自绘页眉） ===
 % 否则单章 PDF 与主控文件格式不一致（用户反馈的合并质量问题之一）。
 \setlength{\headheight}{15pt}
-\pagestyle{fancy}
-\fancyhead[LE,RO]{\slshape\nouppercase{\leftmark}}
-\fancyhead[LO,RE]{\slshape\nouppercase{\rightmark}}
-\fancyfoot[C]{\thepage}
-\renewcommand{\headrulewidth}{0pt}
-\renewcommand{\footrulewidth}{0pt}
-\fancypagestyle{plain}{%
-  \fancyhf{}%
-  \fancyfoot[C]{\thepage}%
-  \renewcommand{\headrulewidth}{0pt}%
-  \renewcommand{\footrulewidth}{0pt}%
+\makeatletter
+\newcommand{\pdfm@noUppercase}[2][]{#2}
+\long\def\pdfm@hdrshow#1{{%
+  \let\uppercase\relax
+  \let\MakeUppercase\pdfm@noUppercase
+  \expandafter\let\csname MakeUppercase \endcsname\relax
+  \expandafter\def\csname MakeUppercase\space\space\space\endcsname[##1]##2{##2}%
+  #1}}
+\def\ps@pdfmaker{%
+  \def\@evenhead{\pdfm@hdrshow{\slshape\small\leftmark}\hfil}%
+  \def\@oddhead{\hfil\pdfm@hdrshow{\slshape\small\rightmark}}%
+  \def\@evenfoot{\hfil\thepage\hfil}%
+  \def\@oddfoot{\hfil\thepage\hfil}%
 }
+\makeatother
+\pagestyle{pdfmaker}
 
 % === 共用补丁片段（唯一真源：templates/_preamble_shared.tex） ===
 % fix 会把本片段内联进模板的对应占位处（中文 URL 支持 / 参考文献降级 /

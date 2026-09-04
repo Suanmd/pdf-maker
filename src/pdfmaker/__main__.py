@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""`python -m pdfmaker` 的模块入口。"""
+"""``python -m pdfmaker`` 的模块入口（转发到 pdfmaker.cli.main）。"""
 
 import sys
 

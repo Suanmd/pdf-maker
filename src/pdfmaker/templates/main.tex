@@ -37,34 +37,34 @@
 
 \usepackage{etoolbox}
 \usepackage{geometry}
-\usepackage{fancyhdr}
 
 % === 共用补丁片段（唯一真源：templates/_preamble_shared.tex） ===
-% scaffold 会把 {{SHARED_PREAMBLE}} 替换为本片段内容（中文 URL 支持 / 参考文献降级 /
+% scaffold 会把下方独立成行的占位符替换为本片段内容（中文 URL 支持 / 参考文献降级 /
 % codeblock 环境 / 防溢出），避免与 _tmp.tex 双份手维护导致漂移。
-% 放在 fancyhdr 之后：此时 etoolbox（\patchcmd）、tcolorbox（\newtcblisting）均已加载，
-% 4 段补丁的顺序依赖全部满足。
+% 此时 etoolbox（\patchcmd / \AtBeginEnvironment）、tcolorbox（\newtcblisting）
+% 均已加载，5 段补丁的顺序依赖全部满足。
 {{SHARED_PREAMBLE}}
 
 \geometry{margin=2.5cm}
 
 % === 页眉页脚统一 ===
-% ctexrep 默认 headings 把页码放在页眉外侧（奇数页右 / 偶数页左），章节首页 plain
-% 页码在底部正中，混合观察就是「页码位置不一致」。
-% 用 fancyhdr 接管：页眉显示 chapter/section 标题，页码统一在页脚居中。
 \setlength{\headheight}{15pt}
-\pagestyle{fancy}
-\fancyhead[LE,RO]{\slshape\nouppercase{\leftmark}}
-\fancyhead[LO,RE]{\slshape\nouppercase{\rightmark}}
-\fancyfoot[C]{\thepage}
-\renewcommand{\headrulewidth}{0pt}
-\renewcommand{\footrulewidth}{0pt}
-\fancypagestyle{plain}{%
-  \fancyhf{}%
-  \fancyfoot[C]{\thepage}%
-  \renewcommand{\headrulewidth}{0pt}%
-  \renewcommand{\footrulewidth}{0pt}%
+\makeatletter
+\newcommand{\pdfm@noUppercase}[2][]{#2}
+\long\def\pdfm@hdrshow#1{{%
+  \let\uppercase\relax
+  \let\MakeUppercase\pdfm@noUppercase
+  \expandafter\let\csname MakeUppercase \endcsname\relax
+  \expandafter\def\csname MakeUppercase\space\space\space\endcsname[##1]##2{##2}%
+  #1}}
+\def\ps@pdfmaker{%
+  \def\@evenhead{\pdfm@hdrshow{\slshape\small\leftmark}\hfil}%
+  \def\@oddhead{\hfil\pdfm@hdrshow{\slshape\small\rightmark}}%
+  \def\@evenfoot{\hfil\thepage\hfil}%
+  \def\@oddfoot{\hfil\thepage\hfil}%
 }
+\makeatother
+\pagestyle{pdfmaker}
 
 \XeTeXlinebreaklocale "zh"
 \XeTeXlinebreakskip=0pt
@@ -96,6 +96,15 @@
 \vspace{0.8cm}
 {\large {{DATE}}\par}
 \end{center}
+\newpage
+
+% ============ 摘要（必选：build 合并前会预检其存在性） ============
+\thispagestyle{empty}
+\chapter*{摘\quad 要}
+\addcontentsline{toc}{chapter}{摘要}
+
+% 在此输入摘要正文（建议 150-300 字，概括全书主题、章节结构与核心结论）
+
 \newpage
 
 % ============ 序言（可选：若不需要则整段删除） ============

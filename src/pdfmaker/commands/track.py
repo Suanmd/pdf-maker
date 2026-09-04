@@ -7,16 +7,17 @@
 
 子命令
 ------
-    python -m pdfmaker track init       <project_dir>              # 初始化 materials.json
-    python -m pdfmaker track show       <project_dir>              # 显示当前状态
-    python -m pdfmaker track check      <project_dir> <ch>         # 检查某章已读状态
-    python -m pdfmaker track update     <proj> <ch> <size> <lines> <N>  # verify 后回调
-    python -m pdfmaker track auto-init  <proj> <ch>                # init + check 组合
-    python -m pdfmaker track bib-audit  <project_dir>              # 引用质量审计
+    python -m pdfmaker track init       <project_dir>                    # 初始化 materials.json
+    python -m pdfmaker track show       <project_dir>                    # 显示当前状态
+    python -m pdfmaker track check      <project_dir> <ch>               # 检查某章已读状态
+    python -m pdfmaker track update     <proj> <ch> <size> <lines> <N>   # verify 后回调登记
+    python -m pdfmaker track stale      <project_dir> <ch>               # 检测 verified 是否过期
+    python -m pdfmaker track auto-init  <proj> <ch>                      # init + check 组合
+    python -m pdfmaker track bib-audit  <project_dir>                    # 引用质量审计
 
 设计约束
 --------
-本工具 **不内置、也不要求建立任何「章节→素材」映射文件**——那是项目特定数据，
+本工具**不内置、也不要求建立任何「章节 → 素材」映射文件**——那是项目特定数据，
 不应随包分发，也不该写死在代码里。素材就是你手头的 ``*.md`` 文件：直接用
 ``reader`` 指向它读取即可（``reader ingest`` 一键通读）。本命令只负责把
 「某章素材是否已完整读完」作为跨会话状态持久化到项目本地的 ``materials.json``：
@@ -25,34 +26,39 @@
 
 退出码
 ------
-    init/show/auto-init/update : 0（异常时非 0）
-    check  : 已 verified 返回 0，未 verified 返回 2，缺文件/缺章节返回 1
-    bib-audit : 全部过线返回 0，存在警告返回 1
+init/show/auto-init/update : 0（异常时非 0）
+check  : 已 verified 返回 0，未 verified 返回 2，缺文件/缺章节返回 1
+stale  : 0 新鲜 / 1 过期（源已改或缺失）/ 2 未 verified 或无指纹记录
+bib-audit : 全部过线返回 0，存在警告返回 1
 """
 
-import sys
-import json
 import argparse
 import hashlib
+import json
 import re
+import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from datetime import datetime, timezone, timedelta
 
-from pdfmaker.core.paths import setup_utf8
 import pdfmaker.core.config as cfg
+from pdfmaker.commands import reader as _reader
 from pdfmaker.core.chapters import chapter_sort_key
+from pdfmaker.core.paths import setup_utf8
+from pdfmaker.core.text import strip_latex_comments
 
 setup_utf8()
 
-# 时区（用于 verified_at 时间戳，可按需调整）
+# 时间戳时区（用于 verified_at 记录，固定东八区）
 TZ = timezone(timedelta(hours=8))
 
 
 def iso_now() -> str:
+    """当前时间的 ISO 格式字符串（东八区），用于 verified_at / updated_at。"""
     return datetime.now(TZ).strftime("%Y-%m-%dT%H:%M:%S+08:00")
 
 
 def human_size(n: int) -> str:
+    """字节数转人类可读字符串（B / KB / MB / GB / TB）。"""
     for unit in ["B", "KB", "MB", "GB"]:
         if n < 1024:
             return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
@@ -61,6 +67,7 @@ def human_size(n: int) -> str:
 
 
 def materials_path(project_dir: str) -> Path:
+    """materials.json 的路径（项目根目录下）。"""
     return Path(project_dir) / "materials.json"
 
 
@@ -74,17 +81,22 @@ def find_search_root(project_dir: str) -> Path:
 
 
 def enumerate_chapters(project_dir: str) -> list[str]:
-    """依据书稿自身的章节目录（第N章 / 附录X）列举章节名。
+    """依据书稿自身的章节结构列举章节名（标准目录布局 + 扁平布局）。
 
-    仅使用本工具自己的书籍结构约定，绝不假定任何素材布局或命名。
+    标准布局看目录（第N章/、附录X/）；扁平布局看文件（第N章.tex、附录X.tex
+    直接在项目根）。仅使用本工具自己的书籍结构约定，绝不假定任何素材布局或命名。
     """
     base = Path(project_dir)
     names = []
     for d in sorted(base.iterdir(), key=chapter_sort_key):
-        if not d.is_dir():
-            continue
-        if re.fullmatch(r"第\d+章", d.name) or re.fullmatch(r"附录[A-Za-z0-9]+", d.name):
-            names.append(d.name)
+        if d.is_dir():
+            if re.fullmatch(r"第\d+章", d.name) or re.fullmatch(r"附录[A-Za-z0-9]+", d.name):
+                names.append(d.name)
+        elif d.is_file():
+            # 扁平布局：第N章.tex / 附录X.tex 直接在项目根
+            m = re.fullmatch(r"(第\d+章|附录[A-Za-z0-9]+)\.tex", d.name)
+            if m:
+                names.append(m.group(1))
     return names
 
 
@@ -103,6 +115,7 @@ def discover_sources(root: Path) -> dict:
 
 
 def cmd_init(project_dir: str) -> int:
+    """初始化 materials.json：按磁盘章节目录建条目，并尽力发现素材文件（init 子命令）。"""
     mp = materials_path(project_dir)
     root = find_search_root(project_dir)
     if mp.exists():
@@ -183,7 +196,7 @@ def cmd_check(project_dir: str, chapter: str) -> int:
         tail = f"，关联素材：{src_label}" if srcs else ""
         print(f"📖 章节正文 {human_size(info.get('size_bytes', 0))} / "
               f"{info.get('total_lines', 0)} 行 / {info.get('chunks_read_count', 0)} chunks 已登记 verify ✅{tail}")
-        # #175：verified 后若源 .tex 被改坏，给出过期告警（不修改返回码，避免破坏 SOP）。
+        # verified 后若源 .tex 被改坏，给出过期告警（不修改返回码，避免破坏 SOP）。
         stored = info.get("content_hash")
         if stored:
             cur = _hash_chapter_tex(project_dir, chapter)
@@ -192,7 +205,7 @@ def cmd_check(project_dir: str, chapter: str) -> int:
                       "请重跑 `track stale` 确认，必要时重跑 check/verify/overflow 后 track update。")
         return 0
     if info.get("status") == "pending-verify":
-        # 离线/TRANSIENT 的「待复验」态，区别于真未验(unverified)。
+        # 离线/TRANSIENT 的「待复验」态，区别于真未验（unverified）。
         print(f"⏳ {chapter} PENDING-VERIFY（离线/TRANSIENT，待联网复验至 verify exit 0）:")
         print(f"   status: {info.get('status')}")
         print(f"   size: {human_size(info.get('size_bytes', 0))}")
@@ -203,13 +216,19 @@ def cmd_check(project_dir: str, chapter: str) -> int:
     print(f"❌ {chapter} NOT verified yet.")
     print(f"   status: {info.get('status')}")
     print(f"   source_files: {info.get('source_files')}")
-    print(f"   next: 跑素材阅读 SOP 逐 chunk 通读")
+    print("   next: 跑素材阅读 SOP 逐 chunk 通读")
     return 2
 
 
 def cmd_update(project_dir: str, chapter: str, size_bytes: int, total_lines: int,
-                chunks_count: int, verified: bool = True, pending: bool = False,
-                material: "str | None" = None) -> int:
+               chunks_count: int, verified: bool = True, pending: bool = False,
+               material: str | None = None) -> int:
+    """登记章节验证状态（update 子命令）：verified / pending-verify / unverified 三态。
+
+    - verified：verify 通过，记录 verified_at 时间戳与源文件 content_hash 指纹；
+    - pending-verify：verify 退出 2（离线/TRANSIENT），待联网复验，不谎报已验活；
+    - unverified：真未验（--no-verify 跳过或 verify 发现死链），撤销旧的 verified 时间戳。
+    """
     mp = materials_path(project_dir)
     if not mp.exists():
         # materials.json 缺失：自动 init（按磁盘章节目录建条目），再登记本章
@@ -220,7 +239,7 @@ def cmd_update(project_dir: str, chapter: str, size_bytes: int, total_lines: int
         return 1
     st = json.loads(mp.read_text(encoding="utf-8"))
     if chapter not in st["chapters"]:
-        # 兜底：章节未纳入 init 枚举（如全新章节）时补登，免去顺序依赖 papercut
+        # 兜底：章节未纳入 init 枚举（如全新章节）时补登，免去顺序依赖
         st["chapters"][chapter] = {
             "source_files": [], "verified": None,
             "size_bytes": 0, "total_lines": 0,
@@ -244,7 +263,7 @@ def cmd_update(project_dir: str, chapter: str, size_bytes: int, total_lines: int
         st["chapters"][chapter].update({
             "verified": iso_now(),
             "status": "verified",
-            "content_hash": _hash_chapter_tex(project_dir, chapter),  # #175：记录源指纹
+            "content_hash": _hash_chapter_tex(project_dir, chapter),  # 记录源指纹，供 stale 检测
         })
     elif pending:
         # 待联网复验（verify 退出 2：离线/TRANSIENT）。与「真未验/DEAD」
@@ -278,8 +297,8 @@ def cmd_auto_init(project_dir: str, chapter: str) -> int:
     return cmd_check(project_dir, chapter)
 
 
-def _chapter_tex_path(project_dir: str, chapter: str) -> "Path | None":
-    """由 project_dir + 章节名解析章节 .tex 路径（兼容 第N章 / 附录X / 纯数字）。"""
+def _chapter_tex_path(project_dir: str, chapter: str) -> Path | None:
+    """由 project_dir + 章节名解析章节 .tex 路径（兼容 第N章 / 附录X / 纯数字 / 扁平布局）。"""
     base = Path(project_dir)
     if chapter.startswith("附录"):
         ch_dir, stem = base / chapter, chapter
@@ -287,11 +306,16 @@ def _chapter_tex_path(project_dir: str, chapter: str) -> "Path | None":
         ch_dir, stem = base / chapter, chapter
     else:
         ch_dir, stem = base / f"第{chapter}章", f"第{chapter}章"
-    return _resolve_chapter_tex(ch_dir, stem)
+    p = _resolve_chapter_tex(ch_dir, stem)
+    if p is not None:
+        return p
+    # 扁平布局兜底：第N章.tex 直接在项目根
+    flat = base / f"{stem}.tex"
+    return flat if flat.exists() else None
 
 
-def _hash_chapter_tex(project_dir: str, chapter: str) -> "str | None":
-    """计算章节 .tex 的 sha256（用于 verified 后检测源文件是否被改动，#175）。"""
+def _hash_chapter_tex(project_dir: str, chapter: str) -> str | None:
+    """计算章节 .tex 的 sha256（用于 verified 后检测源文件是否被改动）。"""
     p = _chapter_tex_path(project_dir, chapter)
     if p is None or not p.exists():
         return None
@@ -299,7 +323,7 @@ def _hash_chapter_tex(project_dir: str, chapter: str) -> "str | None":
 
 
 def cmd_stale(project_dir: str, chapter: str) -> int:
-    """检测某章 verified 状态是否过期（源 .tex 自 verified 后被改动，#175）。
+    """检测某章 verified 状态是否过期（源 .tex 自 verified 后被改动）。
 
     防御「track 不回退」信任陷阱：章节标记 verified 后若被手动改坏，materials.json
     不会自动回退。本命令比对当前源文件 sha256 与 verified 时记录的指纹。
@@ -331,11 +355,12 @@ def cmd_stale(project_dir: str, chapter: str) -> int:
         print(f"✅ {chapter} 源文件自 verified 后未变更（新鲜）")
         return 0
     print(f"⚠️ STALE：{chapter} 源 .tex 自 verified 后已变更，verified 状态可能已过期")
-    print(f"    请重跑 check / verify / overflow 后重新 track update")
+    print("    请重跑 check / verify / overflow 后重新 track update")
     return 1
 
 
 def _ch_name_to_num(name: str):
+    """章节名 → 章号：第N章 → int(N)；附录X → "X"；无法解析返回 None。"""
     if name.startswith("第") and "章" in name:
         n = name[1:name.index("章")]
         try:
@@ -347,7 +372,7 @@ def _ch_name_to_num(name: str):
     return None
 
 
-def _resolve_chapter_tex(ch_dir: Path, stem: str) -> "Path | None":
+def _resolve_chapter_tex(ch_dir: Path, stem: str) -> Path | None:
     """定位章节 .tex：优先 <stem>.tex；否则在章目录内 glob 任意 *.tex（排除 _tmp.tex）。
 
     去除对「第n章/第n章.tex」命名的硬编码依赖，兼容其他命名约定。
@@ -390,6 +415,9 @@ def cmd_bib_audit(project_dir: str) -> int:
             print(f"{ch:<10} - 在 {ch_dir} 未找到章节 .tex，跳过")
             continue
         content = tex.read_text(encoding="utf-8")
+        # 剥离 LaTeX 注释：被注释掉的示例 \bibitem / \url（如骨架里的注释占位）
+        # 不是真实引用，计入会让审计失真。
+        content = strip_latex_comments(content)
         urls = re.findall(r"\\url\{([^}]+)\}", content)
         urls += re.findall(r"\\href\{([^}]+)\}\{", content)
         if not urls:
@@ -448,21 +476,27 @@ def main(argv: list[str] | None = None) -> int:
     p_check = sub.add_parser("check", help="检查某章已读状态")
     p_check.add_argument("project_dir", help="书稿项目根目录")
     p_check.add_argument("chapter", help="章节名，如 第4章")
-    p_stale = sub.add_parser("stale", help="检测某章 verified 是否过期（源文件改坏，#175）")
+    p_stale = sub.add_parser("stale", help="检测某章 verified 是否过期（源文件改坏）")
     p_stale.add_argument("project_dir", help="书稿项目根目录")
     p_stale.add_argument("chapter", help="章节名，如 第4章")
-    p_update = sub.add_parser("update", help="verify 后回调登记")
+    p_update = sub.add_parser("update", help="verify 后回调登记（--auto 免手抄数字）")
     p_update.add_argument("project_dir", help="书稿项目根目录")
     p_update.add_argument("chapter", help="章节名，如 第4章")
-    p_update.add_argument("size_bytes", type=int, help="章节 .tex 文件字节数")
-    p_update.add_argument("total_lines", type=int, help="章节 .tex 总行数")
-    p_update.add_argument("chunks_count", type=int, help="已读素材 chunk 数（无 --material 时为 0）")
+    p_update.add_argument("size_bytes", type=int, nargs="?", default=None,
+                          help="章节 .tex 文件字节数（--auto 时自动计算，可省略）")
+    p_update.add_argument("total_lines", type=int, nargs="?", default=None,
+                          help="章节 .tex 总行数（--auto 时自动计算，可省略）")
+    p_update.add_argument("chunks_count", type=int, nargs="?", default=None,
+                          help="已读素材 chunk 数（--auto 且给了 --material 时自动取 reader 状态）")
     p_update.add_argument("--material", default=None,
                           help="关联素材文件路径（写入 source_files，便于 track check 追溯）")
     p_update.add_argument("--unverified", action="store_true",
                           help="标记本章真未验活（如 chapter --no-verify 显式跳过、或 verify 发现 DEAD/截断链接）")
     p_update.add_argument("--pending-verify", action="store_true",
                           help="标记本章待联网复验（verify 退出 2：离线/TRANSIENT）。区别于 --unverified（真未验/死链），不污染已交付信号")
+    p_update.add_argument("--auto", action="store_true",
+                          help="自动取数：size/lines 由章节 .tex 实测，chunks 由 --material 的 "
+                               "reader 状态读取，免去手工抄数（此时三个位置参数可省略）")
     p_auto = sub.add_parser("auto-init", help="init + check 组合")
     p_auto.add_argument("project_dir", help="书稿项目根目录")
     p_auto.add_argument("chapter", help="章节名，如 第4章")
@@ -479,8 +513,34 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "stale":
         return cmd_stale(args.project_dir, args.chapter)
     elif args.cmd == "update":
-        return cmd_update(args.project_dir, args.chapter, args.size_bytes,
-                          args.total_lines, args.chunks_count,
+        size_bytes, total_lines, chunks_count = (
+            args.size_bytes, args.total_lines, args.chunks_count)
+        if args.auto:
+            # 自动取数：size/lines 取章节 .tex 实测值；chunks 取素材 reader 状态。
+            # 显式给出的位置参数优先（便于编排器覆盖），缺失项才自动补齐。
+            tex = _chapter_tex_path(args.project_dir, args.chapter)
+            if tex is None:
+                print(f"❌ --auto 无法定位 {args.chapter} 的章节 .tex，"
+                      f"请显式传 <size> <lines> <chunks>")
+                return 1
+            if size_bytes is None:
+                size_bytes = tex.stat().st_size
+            if total_lines is None:
+                total_lines = tex.read_text(encoding="utf-8").count("\n")
+            if chunks_count is None:
+                chunks_count = 0
+                if args.material:
+                    # reader 状态按素材绝对路径 md5 键控，与 reader ingest 记录同源
+                    chunks_count = int(_reader.load_state(args.material)
+                                       .get("total_chunks", 0))
+            print(f"[update] --auto 取数: {tex.name} {size_bytes} bytes / "
+                  f"{total_lines} lines / {chunks_count} chunks")
+        if size_bytes is None or total_lines is None or chunks_count is None:
+            print("❌ update 需要 <size_bytes> <total_lines> <chunks_count> 三个整数，"
+                  "或改用 --auto 自动取数。")
+            return 2
+        return cmd_update(args.project_dir, args.chapter, size_bytes,
+                          total_lines, chunks_count,
                           verified=not (args.unverified or args.pending_verify),
                           pending=args.pending_verify, material=args.material)
     elif args.cmd == "auto-init":

@@ -6,12 +6,15 @@
 一次性列出，便于作者在 xelatex 之前修掉。与 SOP 的区别：lint 永远 exit 0（仅提示），
 不中止写作流程——作者可反复 ``python -m pdfmaker lint N`` 自查。
 
-退出码：0（纯提示，不阻断）。
+退出码
+------
+0（纯提示，不阻断）；2 源文件缺失。
 """
 
 import argparse
 import sys
 
+from pdfmaker.commands import balance, check
 from pdfmaker.core import resolve_source, setup_utf8
 
 setup_utf8()
@@ -42,8 +45,6 @@ def main(argv: list[str] | None = None) -> int:
     # 复用 check / balance，但 lint 一律不阻断：
     # - check 关闭字数门禁（--no-gate），仅展示字数与风险预检；
     # - balance 的阻断项照常打印，但我们忽略其 exit 码，统一返回 0。
-    from pdfmaker.commands import balance, check
-
     print("\n========== [lint] check（字数门禁已关闭） ==========")
     check.main([args.chapter, "--no-gate"])
     print("\n========== [lint] balance（阻断项仅提示不中止） ==========")

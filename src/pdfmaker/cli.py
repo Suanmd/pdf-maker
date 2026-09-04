@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""pdfmaker 命令行入口：子命令分发。
+"""cli —— pdfmaker 命令行入口：子命令分发。
 
 每个子命令对应 ``pdfmaker.commands`` 下的一个模块，模块自身暴露
 ``main(argv=None)`` 并负责 argparse 解析。两种等价调用方式：
@@ -12,6 +12,7 @@
 
 import sys
 
+import pdfmaker.core.config as cfg
 from pdfmaker import __version__
 from pdfmaker.commands import (
     balance,
@@ -19,6 +20,7 @@ from pdfmaker.commands import (
     chapter,
     check,
     cleanup,
+    compile,
     fix,
     labels,
     lint,
@@ -36,6 +38,7 @@ _SUBCOMMANDS = {
     "check": check,
     "balance": balance,
     "lint": lint,
+    "compile": compile,
     "overflow": overflow,
     "xref": xref,
     "verify": verify,
@@ -58,11 +61,12 @@ _HELP = """pdfmaker v{ver} — 中文 LaTeX 报告工程化工具
   check      章节内容结构统计 + 编译前风险预检
   balance    章节结构与引用均衡性检查（阻断/建议分明）
   lint       单章快速预检（check+balance 合并，仅提示不阻断）
+  compile    单章编译一体化（自动定位 xelatex → 编译两遍 → overflow 体检）
   overflow   编译日志体检（Overfull / 缺失字符 / 重复 label / 断链 / Fatal）
   xref       跨章文字引用与 \\ref 安全性校验（合并前预检）
   verify     联网验活全部 URL（exit 0/1/2，带重试与截断检测）
-  build      整书合并（fix_labels → check_xref → 规范化 → xelatex×2 → 体检）
-  chapter    单章九步 SOP 一键编排（reader→fix→check→balance→verify→xelatex×2→overflow→cleanup→track）
+  build      整书合并（labels → xref → 规范化 → xelatex×2 → 体检）
+  chapter    单章全流程 SOP 一键编排（reader → fix → check → balance → verify → xelatex×2 → overflow → cleanup → track）
   cleanup    单章编译后清理（落盘成品 PDF + 归档中间文件）
   labels     跨章重复 \\label 去重
   reader     素材强制阅读三阶段校验（index/chunk/verify/ingest/toc）
@@ -97,10 +101,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # 自动加载项目级配置（.pdfmaker.toml），使所有命令（含编排器）运行时继承项目设置。
     # 环境变量优先级最高，其次 toml，最后默认值；找不到配置文件时静默降级。
-    from pdfmaker.core import config as _cfg
-
-    _cfg.load_project_config()
-    _cfg.apply_project_config()
+    cfg.load_project_config()
+    cfg.apply_project_config()
 
     # 把剩余参数交给子命令模块自行解析（含 reader/track 的二级子命令）。
     # 顶层守卫：SystemExit（argparse 参数错误 / 各命令主动报错）原样透传；
